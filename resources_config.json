@@ -1,0 +1,7 @@
+{
+  "initial_food_pieces": 2000,
+  "initial_food_scale": true,
+  "food_spawn_rate": 0.05,
+  "food_energy": 50.0,
+  "decay_body_rate": 0.995
+}

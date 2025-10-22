@@ -1,0 +1,8 @@
+{
+  "rays": 5,
+  "sense_range": 180.0,
+  "weight_sigma": 0.08,
+  "add_connection_rate": 0.2,
+  "add_node_rate": 0.08,
+  "delete_connection_rate": 0.02
+}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from pathlib import Path
 from typing import Optional
 
 from PySide6.QtCore import QObject, QThread, Signal
@@ -77,6 +78,15 @@ class SimulationController(QObject):
     def request_snapshot(self) -> None:
         snapshot = self._backend.snapshot()
         self.state_updated.emit(snapshot)
+
+    def save_agents(self) -> Path:
+        path = self._backend.save_agents()
+        self.log_emitted.emit(f"Saved agents to {path}")
+        return path
+
+    def load_agents(self, path: Path) -> None:
+        self._backend.load_agents(path)
+        self.log_emitted.emit(f"Loaded agents from {path}")
 
     def _on_progress(self, state: SimulationState) -> None:
         self.state_updated.emit(

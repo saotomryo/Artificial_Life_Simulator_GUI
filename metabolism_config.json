@@ -1,0 +1,8 @@
+{
+  "base_cost": 0.35,
+  "idle_cost": 0.45,
+  "starvation_energy": 120.0,
+  "starvation_cost": 0.55,
+  "move_cost_k": 0.001,
+  "brain_cost_per_conn": 0.0006
+}

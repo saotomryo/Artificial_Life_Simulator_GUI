@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import importlib
+import importlib.util
+import json
 import math
 import threading
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from types import ModuleType
 from typing import Dict, Optional, Protocol
 
@@ -39,6 +42,12 @@ class SimulationBackend(Protocol):
         ...
 
     def snapshot(self) -> Dict:
+        ...
+
+    def save_agents(self) -> Path:
+        ...
+
+    def load_agents(self, path: Path) -> None:
         ...
 
 
@@ -117,6 +126,50 @@ class StubSimulationBackend:
                 "frame": self._state.frame,
             }
 
+    def save_agents(self) -> Path:
+        from random import random
+
+        path = Path("last10_genomes.json")
+        dummy = []
+        for i in range(10):
+            dummy.append(
+                {
+                    "genome": {
+                        "nodes": [],
+                        "conns": [],
+                        "in_ids": [],
+                        "out_ids": [],
+                    },
+                    "S": 1.0 + 0.05 * math.sin(self._state.tick + i),
+                    "score": random(),
+                }
+            )
+        path.write_text(json.dumps(dummy, indent=2))
+        return path
+
+    def load_agents(self, path: Path) -> None:
+        try:
+            data = json.loads(path.read_text())
+        except Exception as exc:
+            raise ValueError(f"Failed to load agents from {path}: {exc}") from exc
+        with self._lock:
+            self._state.tick = 0
+            self._state.population = len(data)
+            self._state.mean_energy = 150.0
+            self._total_births = self._state.population
+            self._total_deaths = 0
+            self._state.births = self._total_births
+            self._state.deaths = 0
+            self._state.frame = {
+                "width": self.config.world.width,
+                "height": self.config.world.height,
+                "agents": [
+                    {"x": (i + 1) * 10.0, "y": (i + 1) * 10.0, "size": 1.0, "energy": 200.0}
+                    for i in range(self._state.population)
+                ],
+                "foods": [],
+                "bodies": [],
+            }
     def _fake_frame(self) -> Dict:
         world_w = self.config.world.width
         world_h = self.config.world.height
@@ -170,11 +223,14 @@ class NeatSimulationBackend:
         self,
         module_name: str = "evo_sim_neat_diverse",
         *,
+        module_path: Optional[Path] = None,
         substeps: int = 1,
         sleep_interval: float = 0.01,
     ) -> None:
         self._module_name = module_name
-        self._module: ModuleType = importlib.import_module(module_name)
+        self._module: ModuleType
+        self._module_path: Optional[Path] = None
+        self._module = self._load_module(module_name, module_path)
         self._config: SimulationConfig = SimulationConfig()
         self._world: Optional[object] = None
         self._state = SimulationState()
@@ -237,6 +293,56 @@ class NeatSimulationBackend:
                 },
                 "frame": self._capture_frame(world),
             }
+
+    def save_agents(self) -> Path:
+        with self._lock:
+            world = self._ensure_world()
+            if hasattr(world, "save_last10"):
+                world.save_last10()
+            last_path = getattr(self._module, "LAST10_PATH", "last10_genomes.json")
+            path = Path(last_path)
+            if not path.is_absolute() and self._module_path is not None:
+                path = (self._module_path.parent / path).resolve()
+            return path
+    def load_agents(self, path: Path) -> None:
+        with self._lock:
+            resolved = path.expanduser().resolve()
+            if not resolved.exists():
+                raise FileNotFoundError(resolved)
+            data = json.loads(resolved.read_text())
+            world = self._ensure_world()
+            # Align the simulator's default save path with the loaded file
+            self._module.LAST10_PATH = str(resolved)
+            world.agents = []
+            if hasattr(world, "_bootstrap_from_last10_diverse"):
+                world._bootstrap_from_last10_diverse(data, self._module.N_INIT)
+            else:
+                # Fallback: recreate agents from dict if available
+                if hasattr(world, "Agent") and hasattr(self._module, "Genome"):
+                    Genome = getattr(self._module, "Genome")
+                    Agent = getattr(self._module, "Agent")
+                    for item in data:
+                        genome_dict = item.get("genome")
+                        genome = Genome.from_dict(genome_dict) if genome_dict else Genome()
+                        agent = Agent(genome)
+                        if "S" in item:
+                            agent.S = item["S"]
+                        world.agents.append(agent)
+            world.t = 0
+            world.births = 0
+            world.deaths = 0
+            self._state = SimulationState(
+                tick=0,
+                population=len(world.agents),
+                mean_energy=sum(getattr(a, "E", 0.0) for a in world.agents) / len(world.agents)
+                if world.agents
+                else 0.0,
+                births=0,
+                deaths=0,
+                food_count=len(getattr(world, "foods", [])),
+                body_count=len(getattr(world, "bodies", [])),
+                frame=self._capture_frame(world),
+            )
 
     # ----- internals -----
     def _apply_config(self) -> None:
@@ -312,3 +418,43 @@ class NeatSimulationBackend:
         for body in getattr(world, "bodies", []):
             frame["bodies"].append({"x": float(body.x), "y": float(body.y), "energy": float(body.e)})
         return frame
+
+    def _load_module(self, module_name: str, module_path: Optional[Path]) -> ModuleType:
+        if module_path is not None:
+            resolved = module_path.expanduser().resolve()
+            if not resolved.exists():
+                raise ModuleNotFoundError(f"Simulation module file not found: {resolved}")
+            module, _ = self._load_from_file(module_name, resolved)
+            self._module_path = resolved
+            return module
+
+        try:
+            module = importlib.import_module(module_name)
+            module_file = getattr(module, "__file__", None)
+            if module_file:
+                self._module_path = Path(module_file).resolve()
+            return module
+        except ModuleNotFoundError:
+            candidate = self._find_candidate_file(module_name)
+            if candidate is None:
+                raise
+            module, resolved = self._load_from_file(module_name, candidate)
+            self._module_path = resolved
+            return module
+
+    def _load_from_file(self, module_name: str, path: Path) -> tuple[ModuleType, Path]:
+        spec = importlib.util.spec_from_file_location(module_name, path)
+        if spec is None or spec.loader is None:
+            raise ModuleNotFoundError(f"Unable to load module from {path}")
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)  # type: ignore[call-arg]
+        return module, path.resolve()
+
+    def _find_candidate_file(self, module_name: str) -> Optional[Path]:
+        filename = f"{module_name}.py"
+        search_dirs = [Path.cwd(), Path.cwd() / "old", Path(__file__).resolve().parent.parent]
+        for directory in search_dirs:
+            candidate = (directory / filename).resolve()
+            if candidate.exists():
+                return candidate
+        return None

@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import json
 from copy import deepcopy
-from typing import Callable, Dict, Tuple, Union
+from pathlib import Path
+from typing import Callable, Dict, Optional, Tuple, Union
 
-from PySide6.QtCore import Qt, QRectF
+from PySide6.QtCore import Qt, QRectF, Signal
 from PySide6.QtGui import QBrush, QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
     QDoubleSpinBox,
+    QFileDialog,
     QFormLayout,
     QGroupBox,
     QHBoxLayout,
@@ -21,10 +24,29 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
+from dataclasses import asdict
+
 from app.core.config import SimulationConfig
 from app.core.controller import SimulationController
+from app.state_manager import StateManager
 
 NumberWidget = Union[QDoubleSpinBox, QSpinBox]
+
+
+class SignalBlocker:
+    """Context manager to temporarily suppress widget signals."""
+
+    def __init__(self, widget) -> None:
+        self._widget = widget
+        self._previous = False
+
+    def __enter__(self):
+        self._previous = self._widget.blockSignals(True)
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self._widget.blockSignals(self._previous)
+        return False
 
 
 class ParameterEditor(QWidget):
@@ -33,11 +55,15 @@ class ParameterEditor(QWidget):
     Designed so new parameter groups can be added without touching UI logic.
     """
 
+    section_save_requested = Signal(str)
+    section_load_requested = Signal(str)
+
     def __init__(self, config: SimulationConfig, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self._config = deepcopy(config)
         self._number_controls: Dict[Tuple[str, str], NumberWidget] = {}
         self._bool_controls: Dict[Tuple[str, str], QCheckBox] = {}
+        self._sections = ["world", "resources", "metabolism", "brain"]
         self._build_ui()
 
     def value(self) -> SimulationConfig:
@@ -59,10 +85,13 @@ class ParameterEditor(QWidget):
         self._add_metabolism_section(layout)
         self._add_brain_section(layout)
         layout.addStretch(1)
+    def sections(self) -> Tuple[str, ...]:
+        return tuple(self._sections)
 
     def _add_world_section(self, layout: QVBoxLayout) -> None:
         group = QGroupBox("World")
-        form = QFormLayout(group)
+        vbox = QVBoxLayout(group)
+        form = QFormLayout()
         form.addRow("Width", self._number_box("world", "width", min_val=200.0, max_val=10000.0, step=100.0))
         form.addRow("Height", self._number_box("world", "height", min_val=200.0, max_val=10000.0, step=100.0))
         form.addRow("Time Step", self._number_box("world", "time_step", decimals=3, step=0.01, min_val=0.01, max_val=1.0))
@@ -70,11 +99,14 @@ class ParameterEditor(QWidget):
             "Initial Population",
             self._number_box("world", "initial_population", widget_type=QSpinBox, min_val=1, max_val=2000, step=1),
         )
+        vbox.addLayout(form)
+        vbox.addLayout(self._section_buttons_layout("world"))
         layout.addWidget(group)
 
     def _add_resource_section(self, layout: QVBoxLayout) -> None:
         group = QGroupBox("Resources")
-        form = QFormLayout(group)
+        vbox = QVBoxLayout(group)
+        form = QFormLayout()
         form.addRow(
             "Initial Food Pieces",
             self._number_box("resources", "initial_food_pieces", widget_type=QSpinBox, min_val=0, max_val=10000, step=50),
@@ -96,11 +128,14 @@ class ParameterEditor(QWidget):
             "Body Decay Rate",
             self._number_box("resources", "decay_body_rate", decimals=3, step=0.001, min_val=0.90, max_val=1.0),
         )
+        vbox.addLayout(form)
+        vbox.addLayout(self._section_buttons_layout("resources"))
         layout.addWidget(group)
 
     def _add_metabolism_section(self, layout: QVBoxLayout) -> None:
         group = QGroupBox("Metabolism")
-        form = QFormLayout(group)
+        vbox = QVBoxLayout(group)
+        form = QFormLayout()
         form.addRow("Base Cost", self._number_box("metabolism", "base_cost", decimals=3, step=0.01, min_val=0.0, max_val=5.0))
         form.addRow("Idle Cost", self._number_box("metabolism", "idle_cost", decimals=3, step=0.01, min_val=0.0, max_val=5.0))
         form.addRow(
@@ -119,11 +154,14 @@ class ParameterEditor(QWidget):
             "Brain Cost per Connection",
             self._number_box("metabolism", "brain_cost_per_conn", decimals=5, step=0.0001, min_val=0.0, max_val=0.01),
         )
+        vbox.addLayout(form)
+        vbox.addLayout(self._section_buttons_layout("metabolism"))
         layout.addWidget(group)
 
     def _add_brain_section(self, layout: QVBoxLayout) -> None:
         group = QGroupBox("Brain & Mutation")
-        form = QFormLayout(group)
+        vbox = QVBoxLayout(group)
+        form = QFormLayout()
         form.addRow(
             "Sensor Rays",
             self._number_box("brain", "rays", widget_type=QSpinBox, min_val=1, max_val=32, step=1),
@@ -148,6 +186,8 @@ class ParameterEditor(QWidget):
             "Delete Connection Rate",
             self._number_box("brain", "delete_connection_rate", decimals=3, step=0.01, min_val=0.0, max_val=1.0),
         )
+        vbox.addLayout(form)
+        vbox.addLayout(self._section_buttons_layout("brain"))
         layout.addWidget(group)
 
     def _number_box(
@@ -183,6 +223,52 @@ class ParameterEditor(QWidget):
         for (section, field), widget in self._bool_controls.items():
             section_obj = getattr(self._config, section)
             setattr(section_obj, field, widget.isChecked())
+
+    def export_section(self, section: str) -> Dict:
+        section_obj = getattr(self._config, section)
+        return asdict(section_obj)
+
+    def import_section(self, section: str, data: Dict) -> None:
+        section_obj = getattr(self._config, section)
+        for key, value in data.items():
+            if hasattr(section_obj, key):
+                current = getattr(section_obj, key)
+                if isinstance(current, bool):
+                    coerced = bool(value)
+                elif isinstance(current, int) and not isinstance(current, bool):
+                    coerced = int(value)
+                elif isinstance(current, float):
+                    coerced = float(value)
+                else:
+                    coerced = value
+                setattr(section_obj, key, coerced)
+                self._set_widget_value(section, key, coerced)
+        self._sync_config()
+
+    def _set_widget_value(self, section: str, field: str, value) -> None:
+        widget = self._number_controls.get((section, field))
+        if widget is not None:
+            with SignalBlocker(widget):
+                if isinstance(widget, QDoubleSpinBox):
+                    widget.setValue(float(value))
+                else:
+                    widget.setValue(int(value))
+            return
+        chk = self._bool_controls.get((section, field))
+        if chk is not None:
+            with SignalBlocker(chk):
+                chk.setChecked(bool(value))
+
+    def _section_buttons_layout(self, section: str) -> QHBoxLayout:
+        layout = QHBoxLayout()
+        layout.addStretch(1)
+        save_btn = QPushButton("Save…")
+        load_btn = QPushButton("Load…")
+        save_btn.clicked.connect(lambda: self.section_save_requested.emit(section))
+        load_btn.clicked.connect(lambda: self.section_load_requested.emit(section))
+        layout.addWidget(save_btn)
+        layout.addWidget(load_btn)
+        return layout
 
 
 class SimulationStatsWidget(QGroupBox):
@@ -292,11 +378,14 @@ class MainWindow(QMainWindow):
     def __init__(self, controller: SimulationController, parent: QWidget | None = None) -> None:
         super().__init__(parent)
         self.controller = controller
+        self.state_manager = StateManager()
+        self._file_filter = "JSON Files (*.json);;All Files (*)"
         self.setWindowTitle("Artificial Life Simulator")
         self.resize(1200, 800)
         self._build_menu()
         self._build_ui()
         self._connect_signals()
+        self._restore_config_files()
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("&File")
@@ -333,8 +422,12 @@ class MainWindow(QMainWindow):
         self.start_button = QPushButton("Start")
         self.stop_button = QPushButton("Stop")
         self.stop_button.setEnabled(False)
+        self.save_button = QPushButton("Save Agents")
+        self.load_button = QPushButton("Load Agents")
         button_row.addWidget(self.start_button)
         button_row.addWidget(self.stop_button)
+        button_row.addWidget(self.save_button)
+        button_row.addWidget(self.load_button)
         right_layout.addLayout(button_row)
 
         self.log_output = QTextEdit()
@@ -351,6 +444,10 @@ class MainWindow(QMainWindow):
     def _connect_signals(self) -> None:
         self.start_button.clicked.connect(self.start_simulation)
         self.stop_button.clicked.connect(self.stop_simulation)
+        self.save_button.clicked.connect(self.save_agents_snapshot)
+        self.load_button.clicked.connect(self.load_agents_snapshot)
+        self.parameter_editor.section_save_requested.connect(self._on_section_save_requested)
+        self.parameter_editor.section_load_requested.connect(self._on_section_load_requested)
         self.controller.state_updated.connect(self._on_state_updated)
         self.controller.config_changed.connect(self._on_config_changed)
         self.controller.simulation_started.connect(self._on_simulation_started)
@@ -367,6 +464,44 @@ class MainWindow(QMainWindow):
 
     def stop_simulation(self) -> None:
         self.controller.stop()
+
+    def save_agents_snapshot(self) -> None:
+        suggested = self.state_manager.get_agent_file() or (Path.cwd() / "last10_genomes.json")
+        path = self._get_save_path("Save Agents", suggested)
+        if path is None:
+            return
+        try:
+            path = path.resolve()
+            data_path = self.controller.save_agents()
+            if Path(data_path).resolve() != path:
+                try:
+                    content = Path(data_path).read_text()
+                    path.write_text(content)
+                finally:
+                    if Path(data_path).resolve() != path:
+                        Path(data_path).unlink(missing_ok=True)
+        except Exception as exc:  # pragma: no cover - UI feedback
+            QMessageBox.critical(self, "Save Failed", str(exc))
+            return
+        self._append_log(f"Agent snapshot saved to {path}")
+        self.statusBar().showMessage(f"Saved agent snapshot to {path}", 5000)
+        self.state_manager.set_agent_file(Path(path))
+        self.controller.request_snapshot()
+
+    def load_agents_snapshot(self) -> None:
+        suggested = self.state_manager.get_agent_file()
+        path = self._get_open_path("Load Agents", suggested)
+        if path is None:
+            return
+        try:
+            self.controller.load_agents(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "Load Failed", str(exc))
+            return
+        self._append_log(f"Loaded agents from {path}")
+        self.statusBar().showMessage(f"Loaded agents from {path}", 5000)
+        self.state_manager.set_agent_file(path)
+        self.controller.request_snapshot()
 
     def _on_state_updated(self, payload: Dict) -> None:
         frame = None
@@ -412,3 +547,85 @@ class MainWindow(QMainWindow):
         if self.controller:
             self.controller.stop()
         super().closeEvent(event)
+
+    def _on_section_save_requested(self, section: str) -> None:
+        data = self.parameter_editor.export_section(section)
+        suggested = self._suggest_config_path(section, for_save=True)
+        path = self._get_save_path(f"Save {section.title()} Settings", suggested)
+        if path is None:
+            return
+        if self._write_json(path, data):
+            self.state_manager.set_config_file(section, path)
+            title = section.title()
+            self._append_log(f"{title} settings saved to {path}")
+            self.statusBar().showMessage(f"{title} settings saved to {path}", 5000)
+
+    def _on_section_load_requested(self, section: str) -> None:
+        suggested = self._suggest_config_path(section, for_save=False)
+        path = self._get_open_path(f"Load {section.title()} Settings", suggested)
+        if path is None:
+            return
+        if self._load_config_from_path(section, path, notify=True):
+            self.state_manager.set_config_file(section, path)
+            self.controller.update_config(self.parameter_editor.value())
+
+    def _restore_config_files(self) -> None:
+        changed = False
+        for section in self.parameter_editor.sections():
+            stored = self.state_manager.get_config_file(section)
+            if stored is None:
+                continue
+            if self._load_config_from_path(section, stored, notify=False):
+                changed = True
+        if changed:
+            self.controller.update_config(self.parameter_editor.value())
+            self._append_log("Restored configuration from previous session.")
+
+    def _suggest_config_path(self, section: str, *, for_save: bool) -> Path:
+        stored = self.state_manager.get_config_file(section)
+        if stored and stored.exists():
+            return stored
+        default_name = f"{section}_config.json"
+        if stored:
+            return stored
+        return Path.cwd() / default_name
+
+    def _get_save_path(self, caption: str, suggested: Path) -> Optional[Path]:
+        filename, _ = QFileDialog.getSaveFileName(self, caption, str(suggested), self._file_filter)
+        if not filename:
+            return None
+        return Path(filename)
+
+    def _get_open_path(self, caption: str, suggested: Optional[Path]) -> Optional[Path]:
+        start = str(suggested) if suggested else str(Path.cwd())
+        filename, _ = QFileDialog.getOpenFileName(self, caption, start, self._file_filter)
+        if not filename:
+            return None
+        return Path(filename)
+
+    def _write_json(self, path: Path, data: Dict) -> bool:
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data, indent=2))
+            return True
+        except Exception as exc:
+            QMessageBox.critical(self, "Save Failed", f"Failed to write {path}:\n{exc}")
+            return False
+
+    def _load_config_from_path(self, section: str, path: Path, *, notify: bool) -> bool:
+        try:
+            data = json.loads(path.read_text())
+        except Exception as exc:
+            if notify:
+                QMessageBox.critical(self, "Load Failed", f"Failed to read {path}:\n{exc}")
+            return False
+        if not isinstance(data, dict):
+            if notify:
+                QMessageBox.critical(self, "Load Failed", f"Invalid data in {path}")
+            return False
+        self.parameter_editor.import_section(section, data)
+        if notify:
+            title = section.title()
+            self._append_log(f"{title} settings loaded from {path}")
+            self.statusBar().showMessage(f"{title} settings loaded from {path}", 5000)
+        return True
