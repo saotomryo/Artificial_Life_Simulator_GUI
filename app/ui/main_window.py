@@ -472,14 +472,14 @@ class MainWindow(QMainWindow):
             return
         try:
             path = path.resolve()
-            data_path = self.controller.save_agents()
-            if Path(data_path).resolve() != path:
+            data_path = Path(self.controller.save_agents()).resolve()
+            if data_path != path:
                 try:
-                    content = Path(data_path).read_text()
+                    content = data_path.read_text()
                     path.write_text(content)
                 finally:
-                    if Path(data_path).resolve() != path:
-                        Path(data_path).unlink(missing_ok=True)
+                    if data_path.exists():
+                        data_path.unlink()
         except Exception as exc:  # pragma: no cover - UI feedback
             QMessageBox.critical(self, "Save Failed", str(exc))
             return

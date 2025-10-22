@@ -32,8 +32,8 @@ def parse_args(argv: Sequence[str]) -> tuple[argparse.Namespace, list[str]]:
     )
     parser.add_argument(
         "--sim-module",
-        default="evo_sim_neat_diverse",
-        help="Importable module name for the simulation logic (default: evo_sim_neat_diverse)",
+        default="app.sim.neat_simulation",
+        help="Importable module name for the simulation logic (default: app.sim.neat_simulation)",
     )
     parser.add_argument(
         "--sim-file",

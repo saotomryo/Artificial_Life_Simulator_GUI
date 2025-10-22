@@ -221,7 +221,7 @@ class NeatSimulationBackend:
 
     def __init__(
         self,
-        module_name: str = "evo_sim_neat_diverse",
+        module_name: str = "app.sim.neat_simulation",
         *,
         module_path: Optional[Path] = None,
         substeps: int = 1,
@@ -452,7 +452,13 @@ class NeatSimulationBackend:
 
     def _find_candidate_file(self, module_name: str) -> Optional[Path]:
         filename = f"{module_name}.py"
-        search_dirs = [Path.cwd(), Path.cwd() / "old", Path(__file__).resolve().parent.parent]
+        base = Path(__file__).resolve().parent
+        search_dirs = [
+            Path.cwd(),
+            Path.cwd() / "old",
+            base.parent,
+            base / "sim",
+        ]
         for directory in search_dirs:
             candidate = (directory / filename).resolve()
             if candidate.exists():
