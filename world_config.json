@@ -2,5 +2,5 @@
   "width": 2000.0,
   "height": 2000.0,
   "time_step": 0.15,
-  "initial_population": 50
+  "initial_population": 20
 }

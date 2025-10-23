@@ -90,7 +90,7 @@ python -m app.main --sim-file path/to/custom_sim.py
 ### 設定エディタ
 - `World` `Resources` `Metabolism` `Brain & Mutation` の 4 セクション。
 - 各セクションに `Save…` / `Load…` ボタンを配置し、JSON ファイルとの入出力が可能。
-- 例: `world_config.json`, `resources_config.json` など。
+- 例: `world_config.json`, `resources_config.json` など。`Resources` セクションでは密度変動パラメータ（σ）を指定でき、フードの出現密度フィールドをランダム生成できます。
 
 ---
 

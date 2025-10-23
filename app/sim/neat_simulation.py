@@ -32,6 +32,7 @@ INITIAL_FOOD_PIECES    = 2000#1200   # 起動時にばら撒くフード個数�
 INITIAL_FOOD_SCALE     = True   # True の場合、ワールド面積に応じて自動スケール
 DECAY_BODY      = 0.995
 BODY_INIT_EN    = 80.0
+FOOD_DENSITY_VARIATION = 0.0
 
 MOVE_COST_K             = 0.001#0.002
 BRAIN_COST_PER_CONN     = 0.0006#0.0006  # ← 結合数比例
@@ -460,6 +461,9 @@ class World:
         self.births = 0
         self.deaths = 0
         self.grid: List[List[List[int]]] = [[[] for _ in range(GRID_H)] for __ in range(GRID_W)]
+        self._food_density_cdf: Optional[np.ndarray] = None
+        self._food_density_weights: Optional[np.ndarray] = None
+        self._init_food_density_field()
 
         # 初期フードのばら撒き（足りない初期餌問題の対策）
         if INITIAL_FOOD_SCALE:
@@ -513,12 +517,56 @@ class World:
     def spawn_food(self):
         # Note: ランタイムのフード出現密度は FOOD_RATE で制御します。増減で継続的な餌の量を調整可能。
         if rand.random() < FOOD_RATE:
-            self.foods.append(Food(rand.uniform(0,W), rand.uniform(0,H), FOOD_EN))
+            x, y = self._random_food_position()
+            self.foods.append(Food(x, y, FOOD_EN))
 
     def _seed_food(self, n: int):
         """起動直後にフードを一括投入して初期飢餓を防ぐ。"""
         for _ in range(max(0, int(n))):
-            self.foods.append(Food(rand.uniform(0, W), rand.uniform(0, H), FOOD_EN))
+            x, y = self._random_food_position()
+            self.foods.append(Food(x, y, FOOD_EN))
+
+    def _init_food_density_field(self) -> None:
+        variation = max(0.0, float(FOOD_DENSITY_VARIATION))
+        if variation <= 1e-6:
+            self._food_density_weights = None
+            self._food_density_cdf = None
+            return
+
+        tiles_x = max(1, min(GRID_W, 8))
+        tiles_y = max(1, min(GRID_H, 8))
+        sigma = variation
+        coarse = np.exp(
+            rng.normal(loc=-0.5 * sigma * sigma, scale=sigma, size=(tiles_y, tiles_x))
+        )
+
+        repeat_y = int(math.ceil(GRID_H / tiles_y))
+        repeat_x = int(math.ceil(GRID_W / tiles_x))
+        weights = np.repeat(np.repeat(coarse, repeat_y, axis=0), repeat_x, axis=1)
+        weights = weights[:GRID_H, :GRID_W]
+        weights = weights / weights.mean()  # 正規化して平均 1 に
+
+        flat = weights.astype(np.float64).reshape(-1)
+        cdf = np.cumsum(flat)
+        cdf /= cdf[-1]
+        self._food_density_weights = flat
+        self._food_density_cdf = cdf
+
+    def _sample_food_cell(self) -> Tuple[int, int]:
+        if self._food_density_cdf is None:
+            return rand.randrange(GRID_W), rand.randrange(GRID_H)
+        r = rand.random()
+        idx = int(np.searchsorted(self._food_density_cdf, r, side="right"))
+        idx = min(idx, self._food_density_cdf.size - 1)
+        gx = idx % GRID_W
+        gy = idx // GRID_W
+        return gx, gy
+
+    def _random_food_position(self) -> Tuple[float, float]:
+        gx, gy = self._sample_food_cell()
+        x = (gx + rand.random()) * CELL
+        y = (gy + rand.random()) * CELL
+        return x % W, y % H
 
     def is_compatible(self, a: Agent, b: Agent) -> bool:
         d_beh = ( (a.vx-b.vx)**2 + (a.vy-b.vy)**2 )**0.5 / SPEED_MAX_BASE
@@ -859,4 +907,5 @@ __all__ = [
     "LAST10_PATH",
     "N_INIT",
     "DT",
+    "FOOD_DENSITY_VARIATION",
 ]

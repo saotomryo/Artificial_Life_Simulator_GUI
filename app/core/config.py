@@ -22,6 +22,7 @@ class ResourceConfig:
     food_spawn_rate: float = 0.05
     food_energy: float = 50.0
     decay_body_rate: float = 0.995
+    food_density_variation: float = 0.0
 
 
 @dataclass

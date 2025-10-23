@@ -359,6 +359,7 @@ class NeatSimulationBackend:
         sim.FOOD_RATE = cfg.resources.food_spawn_rate
         sim.FOOD_EN = cfg.resources.food_energy
         sim.DECAY_BODY = cfg.resources.decay_body_rate
+        sim.FOOD_DENSITY_VARIATION = cfg.resources.food_density_variation
 
         sim.BASE_COST = cfg.metabolism.base_cost
         sim.IDLE_COST = cfg.metabolism.idle_cost
@@ -457,7 +458,7 @@ class NeatSimulationBackend:
             Path.cwd(),
             Path.cwd() / "old",
             base.parent,
-            base / "sim",
+            base.parent / "sim",
         ]
         for directory in search_dirs:
             candidate = (directory / filename).resolve()

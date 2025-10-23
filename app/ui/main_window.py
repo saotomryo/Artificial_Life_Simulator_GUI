@@ -19,6 +19,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSpinBox,
+    QScrollArea,
     QTextEdit,
     QVBoxLayout,
     QWidget,
@@ -64,6 +65,12 @@ class ParameterEditor(QWidget):
         self._number_controls: Dict[Tuple[str, str], NumberWidget] = {}
         self._bool_controls: Dict[Tuple[str, str], QCheckBox] = {}
         self._sections = ["world", "resources", "metabolism", "brain"]
+        self._section_labels = {
+            "world": "ワールド",
+            "resources": "資源",
+            "metabolism": "代謝",
+            "brain": "脳と変異",
+        }
         self._build_ui()
 
     def value(self) -> SimulationConfig:
@@ -88,15 +95,18 @@ class ParameterEditor(QWidget):
     def sections(self) -> Tuple[str, ...]:
         return tuple(self._sections)
 
+    def section_label(self, section: str) -> str:
+        return self._section_labels.get(section, section)
+
     def _add_world_section(self, layout: QVBoxLayout) -> None:
-        group = QGroupBox("World")
+        group = QGroupBox(self._section_labels["world"])
         vbox = QVBoxLayout(group)
         form = QFormLayout()
-        form.addRow("Width", self._number_box("world", "width", min_val=200.0, max_val=10000.0, step=100.0))
-        form.addRow("Height", self._number_box("world", "height", min_val=200.0, max_val=10000.0, step=100.0))
-        form.addRow("Time Step", self._number_box("world", "time_step", decimals=3, step=0.01, min_val=0.01, max_val=1.0))
+        form.addRow("幅", self._number_box("world", "width", min_val=200.0, max_val=10000.0, step=100.0))
+        form.addRow("高さ", self._number_box("world", "height", min_val=200.0, max_val=10000.0, step=100.0))
+        form.addRow("時間刻み", self._number_box("world", "time_step", decimals=3, step=0.01, min_val=0.01, max_val=1.0))
         form.addRow(
-            "Initial Population",
+            "初期個体数",
             self._number_box("world", "initial_population", widget_type=QSpinBox, min_val=1, max_val=2000, step=1),
         )
         vbox.addLayout(form)
@@ -104,54 +114,58 @@ class ParameterEditor(QWidget):
         layout.addWidget(group)
 
     def _add_resource_section(self, layout: QVBoxLayout) -> None:
-        group = QGroupBox("Resources")
+        group = QGroupBox(self._section_labels["resources"])
         vbox = QVBoxLayout(group)
         form = QFormLayout()
         form.addRow(
-            "Initial Food Pieces",
+            "初期フード数",
             self._number_box("resources", "initial_food_pieces", widget_type=QSpinBox, min_val=0, max_val=10000, step=50),
         )
         chk = QCheckBox()
         chk.setChecked(self._config.resources.initial_food_scale)
         self._bool_controls[("resources", "initial_food_scale")] = chk
         chk.toggled.connect(self._sync_config)
-        form.addRow("Scale Food by Area", chk)
+        form.addRow("面積でフードをスケーリング", chk)
         form.addRow(
-            "Food Spawn Rate",
+            "フード出現率",
             self._number_box("resources", "food_spawn_rate", decimals=3, step=0.01, min_val=0.0, max_val=1.0),
         )
         form.addRow(
-            "Food Energy",
+            "フードエネルギー",
             self._number_box("resources", "food_energy", decimals=1, step=5.0, min_val=0.0, max_val=500.0),
         )
         form.addRow(
-            "Body Decay Rate",
+            "死体減衰率",
             self._number_box("resources", "decay_body_rate", decimals=3, step=0.001, min_val=0.90, max_val=1.0),
+        )
+        form.addRow(
+            "密度変動σ",
+            self._number_box("resources", "food_density_variation", decimals=2, step=0.05, min_val=0.0, max_val=2.0),
         )
         vbox.addLayout(form)
         vbox.addLayout(self._section_buttons_layout("resources"))
         layout.addWidget(group)
 
     def _add_metabolism_section(self, layout: QVBoxLayout) -> None:
-        group = QGroupBox("Metabolism")
+        group = QGroupBox(self._section_labels["metabolism"])
         vbox = QVBoxLayout(group)
         form = QFormLayout()
-        form.addRow("Base Cost", self._number_box("metabolism", "base_cost", decimals=3, step=0.01, min_val=0.0, max_val=5.0))
-        form.addRow("Idle Cost", self._number_box("metabolism", "idle_cost", decimals=3, step=0.01, min_val=0.0, max_val=5.0))
+        form.addRow("基礎消費", self._number_box("metabolism", "base_cost", decimals=3, step=0.01, min_val=0.0, max_val=5.0))
+        form.addRow("アイドル消費", self._number_box("metabolism", "idle_cost", decimals=3, step=0.01, min_val=0.0, max_val=5.0))
         form.addRow(
-            "Starvation Threshold",
+            "飢餓エネルギー閾値",
             self._number_box("metabolism", "starvation_energy", decimals=1, step=10.0, min_val=0.0, max_val=500.0),
         )
         form.addRow(
-            "Starvation Cost",
+            "飢餓追加消費",
             self._number_box("metabolism", "starvation_cost", decimals=3, step=0.01, min_val=0.0, max_val=5.0),
         )
         form.addRow(
-            "Move Cost Coefficient",
+            "移動コスト係数",
             self._number_box("metabolism", "move_cost_k", decimals=5, step=0.0005, min_val=0.0, max_val=0.02),
         )
         form.addRow(
-            "Brain Cost per Connection",
+            "結合あたり脳コスト",
             self._number_box("metabolism", "brain_cost_per_conn", decimals=5, step=0.0001, min_val=0.0, max_val=0.01),
         )
         vbox.addLayout(form)
@@ -159,31 +173,31 @@ class ParameterEditor(QWidget):
         layout.addWidget(group)
 
     def _add_brain_section(self, layout: QVBoxLayout) -> None:
-        group = QGroupBox("Brain & Mutation")
+        group = QGroupBox(self._section_labels["brain"])
         vbox = QVBoxLayout(group)
         form = QFormLayout()
         form.addRow(
-            "Sensor Rays",
+            "センサーレイ数",
             self._number_box("brain", "rays", widget_type=QSpinBox, min_val=1, max_val=32, step=1),
         )
         form.addRow(
-            "Sense Range",
+            "感知距離",
             self._number_box("brain", "sense_range", decimals=1, step=10.0, min_val=10.0, max_val=1000.0),
         )
         form.addRow(
-            "Weight Sigma",
+            "重み摂動σ",
             self._number_box("brain", "weight_sigma", decimals=3, step=0.01, min_val=0.0, max_val=1.0),
         )
         form.addRow(
-            "Add Connection Rate",
+            "結合追加率",
             self._number_box("brain", "add_connection_rate", decimals=3, step=0.01, min_val=0.0, max_val=1.0),
         )
         form.addRow(
-            "Add Node Rate",
+            "ノード追加率",
             self._number_box("brain", "add_node_rate", decimals=3, step=0.01, min_val=0.0, max_val=1.0),
         )
         form.addRow(
-            "Delete Connection Rate",
+            "結合削除率",
             self._number_box("brain", "delete_connection_rate", decimals=3, step=0.01, min_val=0.0, max_val=1.0),
         )
         vbox.addLayout(form)
@@ -262,8 +276,8 @@ class ParameterEditor(QWidget):
     def _section_buttons_layout(self, section: str) -> QHBoxLayout:
         layout = QHBoxLayout()
         layout.addStretch(1)
-        save_btn = QPushButton("Save…")
-        load_btn = QPushButton("Load…")
+        save_btn = QPushButton("保存…")
+        load_btn = QPushButton("読み込み…")
         save_btn.clicked.connect(lambda: self.section_save_requested.emit(section))
         load_btn.clicked.connect(lambda: self.section_load_requested.emit(section))
         layout.addWidget(save_btn)
@@ -275,15 +289,15 @@ class SimulationStatsWidget(QGroupBox):
     """Displays live metrics emitted from the simulation backend."""
 
     def __init__(self, parent: QWidget | None = None) -> None:
-        super().__init__("Live Stats", parent)
+        super().__init__("ライブ統計", parent)
         self._fields: Dict[str, Tuple[str, Callable[[float], str]]] = {
-            "tick": ("Tick", lambda v: f"{int(v)}"),
-            "population": ("Population", lambda v: f"{int(v)}"),
-            "mean_energy": ("Mean Energy", lambda v: f"{float(v):.1f}"),
-            "births": ("Births", lambda v: f"{int(v)}"),
-            "deaths": ("Deaths", lambda v: f"{int(v)}"),
-            "food": ("Food Pieces", lambda v: f"{int(v)}"),
-            "bodies": ("Bodies", lambda v: f"{int(v)}"),
+            "tick": ("経過Tick", lambda v: f"{int(v)}"),
+            "population": ("個体数", lambda v: f"{int(v)}"),
+            "mean_energy": ("平均エネルギー", lambda v: f"{float(v):.1f}"),
+            "births": ("出生数", lambda v: f"{int(v)}"),
+            "deaths": ("死亡数", lambda v: f"{int(v)}"),
+            "food": ("フード数", lambda v: f"{int(v)}"),
+            "bodies": ("死体数", lambda v: f"{int(v)}"),
         }
         self._labels: Dict[str, QLabel] = {}
         layout = QFormLayout(self)
@@ -379,8 +393,8 @@ class MainWindow(QMainWindow):
         super().__init__(parent)
         self.controller = controller
         self.state_manager = StateManager()
-        self._file_filter = "JSON Files (*.json);;All Files (*)"
-        self.setWindowTitle("Artificial Life Simulator")
+        self._file_filter = "JSON ファイル (*.json);;すべてのファイル (*)"
+        self.setWindowTitle("人工生命シミュレーター")
         self.resize(1200, 800)
         self._build_menu()
         self._build_ui()
@@ -388,13 +402,13 @@ class MainWindow(QMainWindow):
         self._restore_config_files()
 
     def _build_menu(self) -> None:
-        file_menu = self.menuBar().addMenu("&File")
-        exit_action = file_menu.addAction("E&xit")
+        file_menu = self.menuBar().addMenu("ファイル(&F)")
+        exit_action = file_menu.addAction("終了(&X)")
         exit_action.triggered.connect(self.close)
 
-        sim_menu = self.menuBar().addMenu("&Simulation")
-        self._start_action = sim_menu.addAction("&Start")
-        self._stop_action = sim_menu.addAction("S&top")
+        sim_menu = self.menuBar().addMenu("シミュレーション(&S)")
+        self._start_action = sim_menu.addAction("開始(&A)")
+        self._stop_action = sim_menu.addAction("停止(&T)")
         self._stop_action.setEnabled(False)
         self._start_action.triggered.connect(self.start_simulation)
         self._stop_action.triggered.connect(self.stop_simulation)
@@ -404,13 +418,16 @@ class MainWindow(QMainWindow):
         layout = QHBoxLayout(central)
 
         self.parameter_editor = ParameterEditor(self.controller.config)
-        layout.addWidget(self.parameter_editor, stretch=2)
+        left_scroll = QScrollArea()
+        left_scroll.setWidgetResizable(True)
+        left_scroll.setWidget(self.parameter_editor)
+        layout.addWidget(left_scroll, stretch=2)
 
         right_side = QWidget()
         right_layout = QVBoxLayout(right_side)
         right_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
-        self.status_label = QLabel("Tick: 0 | Population: 0 | Mean Energy: 0.0")
+        self.status_label = QLabel("経過Tick: 0 | 個体数: 0 | 平均エネルギー: 0.0")
         self.status_label.setObjectName("statusLabel")
         right_layout.addWidget(self.status_label)
         self.world_view = WorldViewWidget()
@@ -419,11 +436,11 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self.stats_widget, stretch=1)
 
         button_row = QHBoxLayout()
-        self.start_button = QPushButton("Start")
-        self.stop_button = QPushButton("Stop")
+        self.start_button = QPushButton("開始")
+        self.stop_button = QPushButton("停止")
         self.stop_button.setEnabled(False)
-        self.save_button = QPushButton("Save Agents")
-        self.load_button = QPushButton("Load Agents")
+        self.save_button = QPushButton("個体を保存")
+        self.load_button = QPushButton("個体を読み込み")
         button_row.addWidget(self.start_button)
         button_row.addWidget(self.stop_button)
         button_row.addWidget(self.save_button)
@@ -433,13 +450,16 @@ class MainWindow(QMainWindow):
         self.log_output = QTextEdit()
         self.log_output.setReadOnly(True)
         self.log_output.setMinimumHeight(200)
-        right_layout.addWidget(QLabel("Event Log"))
+        right_layout.addWidget(QLabel("イベントログ"))
         right_layout.addWidget(self.log_output, stretch=1)
 
-        layout.addWidget(right_side, stretch=3)
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setWidget(right_side)
+        layout.addWidget(right_scroll, stretch=3)
         self.setCentralWidget(central)
 
-        self.statusBar().showMessage("Ready")
+        self.statusBar().showMessage("待機中")
 
     def _connect_signals(self) -> None:
         self.start_button.clicked.connect(self.start_simulation)
@@ -460,14 +480,14 @@ class MainWindow(QMainWindow):
         try:
             self.controller.start()
         except Exception as exc:  # pragma: no cover - UI feedback
-            QMessageBox.critical(self, "Simulation Error", str(exc))
+            QMessageBox.critical(self, "シミュレーションエラー", str(exc))
 
     def stop_simulation(self) -> None:
         self.controller.stop()
 
     def save_agents_snapshot(self) -> None:
         suggested = self.state_manager.get_agent_file() or (Path.cwd() / "last10_genomes.json")
-        path = self._get_save_path("Save Agents", suggested)
+        path = self._get_save_path("個体を保存", suggested)
         if path is None:
             return
         try:
@@ -481,25 +501,25 @@ class MainWindow(QMainWindow):
                     if data_path.exists():
                         data_path.unlink()
         except Exception as exc:  # pragma: no cover - UI feedback
-            QMessageBox.critical(self, "Save Failed", str(exc))
+            QMessageBox.critical(self, "保存に失敗しました", str(exc))
             return
-        self._append_log(f"Agent snapshot saved to {path}")
-        self.statusBar().showMessage(f"Saved agent snapshot to {path}", 5000)
-        self.state_manager.set_agent_file(Path(path))
+        self._append_log(f"個体スナップショットを {path} に保存しました")
+        self.statusBar().showMessage(f"個体スナップショットを {path} に保存しました", 5000)
+        self.state_manager.set_agent_file(path)
         self.controller.request_snapshot()
 
     def load_agents_snapshot(self) -> None:
         suggested = self.state_manager.get_agent_file()
-        path = self._get_open_path("Load Agents", suggested)
+        path = self._get_open_path("個体を読み込み", suggested)
         if path is None:
             return
         try:
             self.controller.load_agents(path)
         except Exception as exc:
-            QMessageBox.critical(self, "Load Failed", str(exc))
+            QMessageBox.critical(self, "読み込みに失敗しました", str(exc))
             return
-        self._append_log(f"Loaded agents from {path}")
-        self.statusBar().showMessage(f"Loaded agents from {path}", 5000)
+        self._append_log(f"{path} から個体を読み込みました")
+        self.statusBar().showMessage(f"{path} から個体を読み込みました", 5000)
         self.state_manager.set_agent_file(path)
         self.controller.request_snapshot()
 
@@ -518,23 +538,23 @@ class MainWindow(QMainWindow):
         tick = int(stats.get("tick", 0))
         population = int(stats.get("population", 0))
         mean_energy = float(stats.get("mean_energy", 0.0))
-        self.status_label.setText(f"Tick: {tick} | Population: {population} | Mean Energy: {mean_energy:.1f}")
+        self.status_label.setText(f"経過Tick: {tick} | 個体数: {population} | 平均エネルギー: {mean_energy:.1f}")
         self.stats_widget.update_stats(stats)
         if frame:
             self.world_view.update_frame(frame)
 
     def _on_config_changed(self, config_dict: Dict) -> None:
-        self._append_log("Configuration updated.")
+        self._append_log("設定を更新しました。")
 
     def _on_simulation_started(self) -> None:
-        self.statusBar().showMessage("Simulation running")
+        self.statusBar().showMessage("シミュレーション実行中")
         self.start_button.setEnabled(False)
         self.stop_button.setEnabled(True)
         self._start_action.setEnabled(False)
         self._stop_action.setEnabled(True)
 
     def _on_simulation_stopped(self) -> None:
-        self.statusBar().showMessage("Simulation stopped")
+        self.statusBar().showMessage("シミュレーション停止")
         self.start_button.setEnabled(True)
         self.stop_button.setEnabled(False)
         self._start_action.setEnabled(True)
@@ -549,20 +569,21 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def _on_section_save_requested(self, section: str) -> None:
+        label = self.parameter_editor.section_label(section)
         data = self.parameter_editor.export_section(section)
         suggested = self._suggest_config_path(section, for_save=True)
-        path = self._get_save_path(f"Save {section.title()} Settings", suggested)
+        path = self._get_save_path(f"{label}設定を保存", suggested)
         if path is None:
             return
         if self._write_json(path, data):
             self.state_manager.set_config_file(section, path)
-            title = section.title()
-            self._append_log(f"{title} settings saved to {path}")
-            self.statusBar().showMessage(f"{title} settings saved to {path}", 5000)
+            self._append_log(f"{label}設定を {path} に保存しました")
+            self.statusBar().showMessage(f"{label}設定を {path} に保存しました", 5000)
 
     def _on_section_load_requested(self, section: str) -> None:
+        label = self.parameter_editor.section_label(section)
         suggested = self._suggest_config_path(section, for_save=False)
-        path = self._get_open_path(f"Load {section.title()} Settings", suggested)
+        path = self._get_open_path(f"{label}設定を読み込み", suggested)
         if path is None:
             return
         if self._load_config_from_path(section, path, notify=True):
@@ -579,7 +600,7 @@ class MainWindow(QMainWindow):
                 changed = True
         if changed:
             self.controller.update_config(self.parameter_editor.value())
-            self._append_log("Restored configuration from previous session.")
+            self._append_log("前回利用した設定を復元しました。")
 
     def _suggest_config_path(self, section: str, *, for_save: bool) -> Path:
         stored = self.state_manager.get_config_file(section)
@@ -609,7 +630,7 @@ class MainWindow(QMainWindow):
             path.write_text(json.dumps(data, indent=2))
             return True
         except Exception as exc:
-            QMessageBox.critical(self, "Save Failed", f"Failed to write {path}:\n{exc}")
+            QMessageBox.critical(self, "保存に失敗しました", f"{path} への書き込みに失敗しました:\n{exc}")
             return False
 
     def _load_config_from_path(self, section: str, path: Path, *, notify: bool) -> bool:
@@ -617,15 +638,15 @@ class MainWindow(QMainWindow):
             data = json.loads(path.read_text())
         except Exception as exc:
             if notify:
-                QMessageBox.critical(self, "Load Failed", f"Failed to read {path}:\n{exc}")
+                QMessageBox.critical(self, "読み込みに失敗しました", f"{path} の読み込みに失敗しました:\n{exc}")
             return False
         if not isinstance(data, dict):
             if notify:
-                QMessageBox.critical(self, "Load Failed", f"Invalid data in {path}")
+                QMessageBox.critical(self, "読み込みに失敗しました", f"{path} の内容が不正です")
             return False
         self.parameter_editor.import_section(section, data)
+        label = self.parameter_editor.section_label(section)
         if notify:
-            title = section.title()
-            self._append_log(f"{title} settings loaded from {path}")
-            self.statusBar().showMessage(f"{title} settings loaded from {path}", 5000)
+            self._append_log(f"{label}設定を {path} から読み込みました")
+            self.statusBar().showMessage(f"{label}設定を {path} から読み込みました", 5000)
         return True

@@ -66,7 +66,7 @@ class SimulationController(QObject):
         self._backend.start()
         self._worker.start()
         self.simulation_started.emit()
-        self.log_emitted.emit("Simulation started.")
+        self.log_emitted.emit("シミュレーションを開始しました。")
 
     def stop(self) -> None:
         if not self._worker.isRunning():
@@ -81,12 +81,12 @@ class SimulationController(QObject):
 
     def save_agents(self) -> Path:
         path = self._backend.save_agents()
-        self.log_emitted.emit(f"Saved agents to {path}")
+        self.log_emitted.emit(f"個体を {path} に保存しました。")
         return path
 
     def load_agents(self, path: Path) -> None:
         self._backend.load_agents(path)
-        self.log_emitted.emit(f"Loaded agents from {path}")
+        self.log_emitted.emit(f"{path} から個体を読み込みました。")
 
     def _on_progress(self, state: SimulationState) -> None:
         self.state_updated.emit(
@@ -104,4 +104,4 @@ class SimulationController(QObject):
 
     def _on_worker_stopped(self) -> None:
         self.simulation_stopped.emit()
-        self.log_emitted.emit("Simulation stopped.")
+        self.log_emitted.emit("シミュレーションを停止しました。")
