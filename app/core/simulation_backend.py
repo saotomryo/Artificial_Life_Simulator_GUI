@@ -361,13 +361,20 @@ class NeatSimulationBackend:
         sim.DECAY_BODY = cfg.resources.decay_body_rate
         sim.FOOD_DENSITY_VARIATION = cfg.resources.food_density_variation
 
+        env = cfg.environment
+        sim.SEASON_PERIOD = env.season_period
+        sim.SEASON_AMPLITUDE = env.season_amplitude
+        sim.HAZARD_STRENGTH = env.hazard_strength
+        sim.HAZARD_COVERAGE = env.hazard_coverage
+
         sim.BASE_COST = cfg.metabolism.base_cost
         sim.IDLE_COST = cfg.metabolism.idle_cost
         sim.STARVATION_E = cfg.metabolism.starvation_energy
         sim.STARVATION_COST = cfg.metabolism.starvation_cost
         sim.MOVE_COST_K = cfg.metabolism.move_cost_k
         sim.BRAIN_COST_PER_CONN = cfg.metabolism.brain_cost_per_conn
-
+        sim.FISSION_RATE_FACTOR = cfg.metabolism.fission_bias
+ 
         sim.N_RAYS = cfg.brain.rays
         sim.R_SENSE = cfg.brain.sense_range
         sim.WEIGHT_SIGMA = cfg.brain.weight_sigma

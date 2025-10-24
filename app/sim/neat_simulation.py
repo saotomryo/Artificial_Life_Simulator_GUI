@@ -10,7 +10,7 @@ import json
 import math
 import os
 import random
-from dataclasses import dataclass
+from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -33,6 +33,10 @@ INITIAL_FOOD_SCALE     = True   # True の場合、ワールド面積に応じ�
 DECAY_BODY      = 0.995
 BODY_INIT_EN    = 80.0
 FOOD_DENSITY_VARIATION = 0.0
+SEASON_PERIOD = 1200.0
+SEASON_AMPLITUDE = 0.0
+HAZARD_STRENGTH = 0.0
+HAZARD_COVERAGE = 0.0
 
 MOVE_COST_K             = 0.001#0.002
 BRAIN_COST_PER_CONN     = 0.0006#0.0006  # ← 結合数比例
@@ -55,6 +59,7 @@ FISSION_ENERGY_TH       = 280.0
 FISSION_FOOD_UNITS_TH   = 5.0     # “食べた量”の累積しきい値
 FISSION_CHILD_EN        = 100.0
 FISSION_PARENT_COST     = 70.0
+FISSION_RATE_FACTOR     = 1.0
 
 # 構造変異（NEAT風）
 P_ADD_CONN      = 0.20
@@ -464,6 +469,9 @@ class World:
         self._food_density_cdf: Optional[np.ndarray] = None
         self._food_density_weights: Optional[np.ndarray] = None
         self._init_food_density_field()
+        self._hazard_field: Optional[np.ndarray] = None
+        self._hazard_damage_scale: float = 0.0
+        self._init_hazard_field()
 
         # 初期フードのばら撒き（足りない初期餌問題の対策）
         if INITIAL_FOOD_SCALE:
@@ -514,9 +522,10 @@ class World:
         return out
 
     # ---------- 生態 ----------
-    def spawn_food(self):
+    def spawn_food(self, season_mult: Optional[float] = None):
         # Note: ランタイムのフード出現密度は FOOD_RATE で制御します。増減で継続的な餌の量を調整可能。
-        if rand.random() < FOOD_RATE:
+        rate = FOOD_RATE * (season_mult if season_mult is not None else self._season_multiplier())
+        if rand.random() < rate:
             x, y = self._random_food_position()
             self.foods.append(Food(x, y, FOOD_EN))
 
@@ -568,6 +577,44 @@ class World:
         y = (gy + rand.random()) * CELL
         return x % W, y % H
 
+    def _season_multiplier(self) -> float:
+        if SEASON_AMPLITUDE <= 1e-6 or SEASON_PERIOD <= 1e-6:
+            return 1.0
+        phase = (self.t % SEASON_PERIOD) / SEASON_PERIOD
+        return max(0.1, 1.0 + SEASON_AMPLITUDE * math.sin(2.0 * math.pi * phase))
+
+    def _init_hazard_field(self) -> None:
+        strength = max(0.0, min(1.0, float(HAZARD_STRENGTH)))
+        coverage = max(0.0, min(1.0, float(HAZARD_COVERAGE)))
+        if strength <= 1e-6 or coverage <= 1e-6:
+            self._hazard_field = None
+            self._hazard_damage_scale = 0.0
+            return
+
+        tiles_x = max(4, min(32, max(4, GRID_W // 2)))
+        tiles_y = max(4, min(32, max(4, GRID_H // 2)))
+        noise = rng.random((tiles_y, tiles_x))
+        threshold = np.quantile(noise, 1.0 - coverage)
+        mask = (noise >= threshold).astype(np.float32)
+        base = rng.random((tiles_y, tiles_x)).astype(np.float32)
+        coarse = base * mask
+        for _ in range(2):
+            coarse = (
+                coarse
+                + np.roll(coarse, 1, axis=0)
+                + np.roll(coarse, -1, axis=0)
+                + np.roll(coarse, 1, axis=1)
+                + np.roll(coarse, -1, axis=1)
+            ) / 5.0
+        coarse = np.clip(coarse, 0.0, 1.0)
+        coarse *= strength
+        repeat_y = int(math.ceil(GRID_H / tiles_y))
+        repeat_x = int(math.ceil(GRID_W / tiles_x))
+        field = np.repeat(np.repeat(coarse, repeat_y, axis=0), repeat_x, axis=1)
+        field = field[:GRID_H, :GRID_W]
+        self._hazard_field = field.astype(np.float32)
+        self._hazard_damage_scale = max(0.5, 2.0 * strength)
+
     def is_compatible(self, a: Agent, b: Agent) -> bool:
         d_beh = ( (a.vx-b.vx)**2 + (a.vy-b.vy)**2 )**0.5 / SPEED_MAX_BASE
         sa = set(a.brain.conns.keys()); sb = set(b.brain.conns.keys())
@@ -578,7 +625,8 @@ class World:
         births_this = 0; deaths_this = 0
         for _ in range(substeps):
             self.t += 1
-            self.spawn_food()
+            season_mult = self._season_multiplier()
+            self.spawn_food(season_mult)
             self.reset_grid()
             self.insert_grid()
 
@@ -634,13 +682,30 @@ class World:
                                 self.bodies.append(Body(b.x, b.y, BODY_INIT_EN)); deaths_this += 1
 
             # 分裂（無性）
+            fission_bias = max(0.1, FISSION_RATE_FACTOR)
+            energy_th = FISSION_ENERGY_TH / fission_bias
+            food_th = FISSION_FOOD_UNITS_TH / fission_bias
+            parent_cost = max(5.0, FISSION_PARENT_COST / fission_bias)
+            child_energy = max(40.0, FISSION_CHILD_EN * min(2.0, fission_bias))
+
             for i,a in enumerate(self.agents):
                 if i in removed or a.E <= 0: continue
-                if a.E > FISSION_ENERGY_TH and a.eaten_units >= FISSION_FOOD_UNITS_TH:
+                if a.E > energy_th and a.eaten_units >= food_th:
                     child_g = a.brain.clone().micro_mutate(weight_sigma=0.03, p_add_conn=0.04, p_add_node=0.015, p_del_conn=0.008)
-                    child = Agent(child_g); child.x, child.y = a.x, a.y; child.E = FISSION_CHILD_EN
-                    a.E -= FISSION_PARENT_COST; a.eaten_units = 0.0
+                    child = Agent(child_g); child.x, child.y = a.x, a.y; child.E = child_energy
+                    a.E -= parent_cost; a.eaten_units = 0.0
                     newborns.append(child); births_this += 1
+
+            # 危険ゾーンによるダメージ
+            if self._hazard_field is not None and HAZARD_STRENGTH > 0.0:
+                damage_scale = self._hazard_damage_scale * max(0.5, season_mult)
+                field = self._hazard_field
+                for a in self.agents:
+                    gx = int(a.x // CELL) % GRID_W
+                    gy = int(a.y // CELL) % GRID_H
+                    hazard = field[gy, gx]
+                    if hazard > 0.0:
+                        a.E -= hazard * damage_scale
 
             # 片付け
             keep = []
@@ -908,4 +973,8 @@ __all__ = [
     "N_INIT",
     "DT",
     "FOOD_DENSITY_VARIATION",
+    "SEASON_PERIOD",
+    "SEASON_AMPLITUDE",
+    "HAZARD_STRENGTH",
+    "HAZARD_COVERAGE",
 ]

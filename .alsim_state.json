@@ -4,6 +4,7 @@
     "world": "/Users/saotome2/develop/\u4eba\u5de5\u751f\u547d/world_config.json",
     "resources": "/Users/saotome2/develop/\u4eba\u5de5\u751f\u547d/resources_config.json",
     "metabolism": "/Users/saotome2/develop/\u4eba\u5de5\u751f\u547d/metabolism_config.json",
-    "brain": "/Users/saotome2/develop/\u4eba\u5de5\u751f\u547d/brain_config.json"
+    "brain": "/Users/saotome2/develop/\u4eba\u5de5\u751f\u547d/brain_config.json",
+    "environment": "/Users/saotome2/develop/\u4eba\u5de5\u751f\u547d/environment_config.json"
   }
 }

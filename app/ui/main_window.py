@@ -64,12 +64,13 @@ class ParameterEditor(QWidget):
         self._config = deepcopy(config)
         self._number_controls: Dict[Tuple[str, str], NumberWidget] = {}
         self._bool_controls: Dict[Tuple[str, str], QCheckBox] = {}
-        self._sections = ["world", "resources", "metabolism", "brain"]
+        self._sections = ["world", "resources", "metabolism", "brain", "environment"]
         self._section_labels = {
             "world": "ワールド",
             "resources": "資源",
             "metabolism": "代謝",
             "brain": "脳と変異",
+            "environment": "環境",
         }
         self._build_ui()
 
@@ -91,6 +92,7 @@ class ParameterEditor(QWidget):
         self._add_resource_section(layout)
         self._add_metabolism_section(layout)
         self._add_brain_section(layout)
+        self._add_environment_section(layout)
         layout.addStretch(1)
     def sections(self) -> Tuple[str, ...]:
         return tuple(self._sections)
@@ -168,6 +170,10 @@ class ParameterEditor(QWidget):
             "結合あたり脳コスト",
             self._number_box("metabolism", "brain_cost_per_conn", decimals=5, step=0.0001, min_val=0.0, max_val=0.01),
         )
+        form.addRow(
+            "分裂バイアス",
+            self._number_box("metabolism", "fission_bias", decimals=2, step=0.1, min_val=0.1, max_val=3.0),
+        )
         vbox.addLayout(form)
         vbox.addLayout(self._section_buttons_layout("metabolism"))
         layout.addWidget(group)
@@ -202,6 +208,30 @@ class ParameterEditor(QWidget):
         )
         vbox.addLayout(form)
         vbox.addLayout(self._section_buttons_layout("brain"))
+        layout.addWidget(group)
+
+    def _add_environment_section(self, layout: QVBoxLayout) -> None:
+        group = QGroupBox(self._section_labels["environment"])
+        vbox = QVBoxLayout(group)
+        form = QFormLayout()
+        form.addRow(
+            "季節周期",
+            self._number_box("environment", "season_period", decimals=0, step=100.0, min_val=100.0, max_val=20000.0),
+        )
+        form.addRow(
+            "季節振幅",
+            self._number_box("environment", "season_amplitude", decimals=2, step=0.05, min_val=0.0, max_val=1.0),
+        )
+        form.addRow(
+            "危険強度",
+            self._number_box("environment", "hazard_strength", decimals=2, step=0.05, min_val=0.0, max_val=1.0),
+        )
+        form.addRow(
+            "危険領域割合",
+            self._number_box("environment", "hazard_coverage", decimals=2, step=0.05, min_val=0.0, max_val=1.0),
+        )
+        vbox.addLayout(form)
+        vbox.addLayout(self._section_buttons_layout("environment"))
         layout.addWidget(group)
 
     def _number_box(

@@ -26,6 +26,14 @@ class ResourceConfig:
 
 
 @dataclass
+class EnvironmentConfig:
+    season_period: float = 1200.0  # tick
+    season_amplitude: float = 0.0  # 0..1 (比率)
+    hazard_strength: float = 0.0   # 0..1
+    hazard_coverage: float = 0.0   # 0..1
+
+
+@dataclass
 class MetabolismConfig:
     base_cost: float = 0.35
     idle_cost: float = 0.45
@@ -33,6 +41,7 @@ class MetabolismConfig:
     starvation_cost: float = 0.55
     move_cost_k: float = 0.001
     brain_cost_per_conn: float = 0.0006
+    fission_bias: float = 1.0
 
 
 @dataclass
@@ -51,6 +60,7 @@ class SimulationConfig:
     resources: ResourceConfig = field(default_factory=ResourceConfig)
     metabolism: MetabolismConfig = field(default_factory=MetabolismConfig)
     brain: BrainConfig = field(default_factory=BrainConfig)
+    environment: EnvironmentConfig = field(default_factory=EnvironmentConfig)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -72,6 +82,7 @@ class SimulationConfig:
         yield "resources", self.resources
         yield "metabolism", self.metabolism
         yield "brain", self.brain
+        yield "environment", self.environment
 
 
 DEFAULT_CONFIG = SimulationConfig()
