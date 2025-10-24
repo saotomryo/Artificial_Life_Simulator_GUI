@@ -23,6 +23,8 @@ class ResourceConfig:
     food_energy: float = 50.0
     decay_body_rate: float = 0.995
     food_density_variation: float = 0.0
+    food_type_energies: List[float] = field(default_factory=lambda: [30.0, 40.0, 55.0, 70.0, 95.0])
+    food_type_weights: List[float] = field(default_factory=lambda: [0.32, 0.25, 0.2, 0.15, 0.08])
 
 
 @dataclass

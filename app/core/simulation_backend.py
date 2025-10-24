@@ -360,6 +360,8 @@ class NeatSimulationBackend:
         sim.FOOD_EN = cfg.resources.food_energy
         sim.DECAY_BODY = cfg.resources.decay_body_rate
         sim.FOOD_DENSITY_VARIATION = cfg.resources.food_density_variation
+        sim.FOOD_TYPE_ENERGIES = cfg.resources.food_type_energies
+        sim.FOOD_TYPE_WEIGHTS = cfg.resources.food_type_weights
 
         env = cfg.environment
         sim.SEASON_PERIOD = env.season_period
@@ -422,7 +424,14 @@ class NeatSimulationBackend:
                 }
             )
         for food in getattr(world, "foods", []):
-            frame["foods"].append({"x": float(food.x), "y": float(food.y)})
+            frame["foods"].append(
+                {
+                    "x": float(food.x),
+                    "y": float(food.y),
+                    "type": int(getattr(food, "type_id", 0)),
+                    "energy": float(getattr(food, "energy", getattr(food, "e", 0.0))),
+                }
+            )
         for body in getattr(world, "bodies", []):
             frame["bodies"].append({"x": float(body.x), "y": float(body.y), "energy": float(body.e)})
         return frame

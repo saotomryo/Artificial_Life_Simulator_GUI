@@ -37,6 +37,8 @@ SEASON_PERIOD = 1200.0
 SEASON_AMPLITUDE = 0.0
 HAZARD_STRENGTH = 0.0
 HAZARD_COVERAGE = 0.0
+FOOD_TYPE_ENERGIES = [30.0, 40.0, 55.0, 70.0, 95.0]
+FOOD_TYPE_WEIGHTS = [0.32, 0.25, 0.2, 0.15, 0.08]
 
 MOVE_COST_K             = 0.001#0.002
 BRAIN_COST_PER_CONN     = 0.0006#0.0006  # ← 結合数比例
@@ -331,15 +333,21 @@ class Genome:
 
     @staticmethod
     def from_dict(d: dict) -> 'Genome':
-        g = Genome(d["in_ids"], d["out_ids"])
+        g = Genome(INPUT_IDS, OUTPUT_IDS)
         g.nodes = {n["id"]: NodeGene(**n) for n in d["nodes"]}
         g.conns = {c["innov"]: ConnGene(**c) for c in d["conns"]}
+        for nid in INPUT_IDS:
+            if nid not in g.nodes:
+                g.nodes[nid] = NodeGene(nid, INPUT, 0.0)
+        for nid in OUTPUT_IDS:
+            if nid not in g.nodes:
+                g.nodes[nid] = NodeGene(nid, OUTPUT, 0.0)
         g.topo_cache_valid = False
         return g
 
 # ===================== 入出力ノード定義 =====================
 N_RAYS = 5
-IN_FEATURES = N_RAYS*3 + 4
+IN_FEATURES = N_RAYS*3 + 6
 OUT_FEATURES = 5
 INPUT_IDS  = list(range(0, IN_FEATURES))
 OUTPUT_IDS = list(range(100, 100+OUT_FEATURES))
@@ -363,7 +371,9 @@ def brain_init_genome() -> Genome:
 class Food:
     x: float
     y: float
-    e: float
+    energy: float
+    type_id: int
+    max_energy: float
 
 @dataclass
 class Body:
@@ -393,7 +403,7 @@ class Agent:
         h = (key % 360) / 360.0
         return hsl_to_rgb(h, 0.65, 0.5)
 
-    def sense(self, neighbors: List['Agent']) -> Dict[int,float]:
+    def sense(self, neighbors: List['Agent'], food_hint: Optional[Tuple[float, float]] = None) -> Dict[int,float]:
         angles = np.linspace(-math.radians(60), math.radians(60), N_RAYS)
         theta  = math.atan2(self.vy, self.vx + 1e-9)
         feats: List[float] = []
@@ -415,14 +425,19 @@ class Agent:
                         best_vproj = relv
             feats += [best_d/R_SENSE, best_S, math.tanh(best_vproj/5.0)]
         spd = math.hypot(self.vx, self.vy)/max(1e-6, SPEED_MAX_BASE)
-        feats += [self.E/400.0, self.S/1.5, spd, 0.0]
+        if food_hint is None:
+            food_type_feat = 0.0
+            food_dist_feat = 1.0
+        else:
+            food_type_feat, food_dist_feat = food_hint
+        feats += [self.E/400.0, self.S/1.5, spd, 0.0, food_type_feat, food_dist_feat]
         x = {nid:0.0 for nid in INPUT_IDS}
         for i,v in enumerate(feats[:len(INPUT_IDS)]):
             x[INPUT_IDS[i]] = v
         return x
 
-    def step(self, neighbors: List['Agent']) -> Tuple[bool,bool,float,float,float]:
-        x = self.sense(neighbors)
+    def step(self, neighbors: List['Agent'], food_hint: Optional[Tuple[float, float]] = None) -> Tuple[bool,bool,float,float,float]:
+        x = self.sense(neighbors, food_hint)
         o = self.brain.forward(x)
         thrust = math.tanh(o[OUTPUT_IDS[0]])
         turn   = math.tanh(o[OUTPUT_IDS[1]]) * 0.3
@@ -468,6 +483,7 @@ class World:
         self.grid: List[List[List[int]]] = [[[] for _ in range(GRID_H)] for __ in range(GRID_W)]
         self._food_density_cdf: Optional[np.ndarray] = None
         self._food_density_weights: Optional[np.ndarray] = None
+        self._init_food_types()
         self._init_food_density_field()
         self._hazard_field: Optional[np.ndarray] = None
         self._hazard_damage_scale: float = 0.0
@@ -527,13 +543,36 @@ class World:
         rate = FOOD_RATE * (season_mult if season_mult is not None else self._season_multiplier())
         if rand.random() < rate:
             x, y = self._random_food_position()
-            self.foods.append(Food(x, y, FOOD_EN))
+            type_id, energy = self._choose_food_type()
+            self.foods.append(Food(x, y, energy, type_id, energy))
 
     def _seed_food(self, n: int):
         """起動直後にフードを一括投入して初期飢餓を防ぐ。"""
         for _ in range(max(0, int(n))):
             x, y = self._random_food_position()
-            self.foods.append(Food(x, y, FOOD_EN))
+            type_id, energy = self._choose_food_type()
+            self.foods.append(Food(x, y, energy, type_id, energy))
+
+    def _init_food_types(self) -> None:
+        energies = np.array(FOOD_TYPE_ENERGIES, dtype=np.float32)
+        if energies.size == 0:
+            energies = np.array([float(FOOD_EN)], dtype=np.float32)
+        weights = np.array(FOOD_TYPE_WEIGHTS, dtype=np.float64)
+        if weights.size != energies.size or weights.sum() <= 0.0:
+            weights = np.ones_like(energies, dtype=np.float64)
+        weights = np.clip(weights, 1e-6, None)
+        weights = weights / weights.sum()
+        self._food_type_energies = energies
+        self._food_type_cdf = np.cumsum(weights)
+        self._food_type_count = energies.size
+
+    def _choose_food_type(self) -> Tuple[int, float]:
+        if getattr(self, "_food_type_count", 0) <= 0:
+            return 0, float(FOOD_EN)
+        r = rand.random()
+        idx = int(np.searchsorted(self._food_type_cdf, r, side="right"))
+        idx = min(idx, self._food_type_count - 1)
+        return idx, float(self._food_type_energies[idx])
 
     def _init_food_density_field(self) -> None:
         variation = max(0.0, float(FOOD_DENSITY_VARIATION))
@@ -576,6 +615,27 @@ class World:
         x = (gx + rand.random()) * CELL
         y = (gy + rand.random()) * CELL
         return x % W, y % H
+
+    def _food_hint(self, agent: Agent) -> Optional[Tuple[float, float]]:
+        if not self.foods:
+            return None
+        best_food: Optional[Food] = None
+        best_dist = R_SENSE
+        for f in self.foods:
+            dx = torus_delta(f.x - agent.x, W)
+            dy = torus_delta(f.y - agent.y, H)
+            dist = math.hypot(dx, dy)
+            if dist < best_dist:
+                best_dist = dist
+                best_food = f
+        if best_food is None:
+            return None
+        if self._food_type_count <= 1:
+            type_feat = 0.0
+        else:
+            type_feat = best_food.type_id / (self._food_type_count - 1)
+        dist_feat = min(1.0, best_dist / R_SENSE)
+        return (type_feat, dist_feat)
 
     def _season_multiplier(self) -> float:
         if SEASON_AMPLITUDE <= 1e-6 or SEASON_PERIOD <= 1e-6:
@@ -630,7 +690,7 @@ class World:
             self.reset_grid()
             self.insert_grid()
 
-            intents = [a.step(self.neighbors(a, R_SENSE)) for a in self.agents]
+            intents = [a.step(self.neighbors(a, R_SENSE), self._food_hint(a)) for a in self.agents]
 
             # 食餌・死体スカベンジ
             for i,a in enumerate(self.agents):
@@ -639,10 +699,13 @@ class World:
                 # 食餌
                 for f in self.foods:
                     dx = torus_delta(f.x - a.x, W); dy = torus_delta(f.y - a.y, H)
-                    if dx*dx + dy*dy < R_HIT*R_HIT and f.e > 0:
-                        take = min(f.e, FOOD_EN) * (0.3 + 0.7*eat_str)
-                        a.E += take; f.e -= take
-                        a.eaten_units += take / FOOD_EN
+                    if dx*dx + dy*dy < R_HIT*R_HIT and f.energy > 0:
+                        base = self._food_type_energies[f.type_id] if self._food_type_count > 0 else FOOD_EN
+                        take_base = min(f.energy, base)
+                        take = take_base * (0.3 + 0.7*eat_str)
+                        a.E += take
+                        f.energy -= take
+                        a.eaten_units += take / max(1.0, base)
                 # 死体
                 for bdy in self.bodies:
                     dx = torus_delta(bdy.x - a.x, W); dy = torus_delta(bdy.y - a.y, H)
@@ -721,7 +784,7 @@ class World:
             # 死体減衰・餌整理
             for b in self.bodies: b.e *= DECAY_BODY
             self.bodies = [b for b in self.bodies if b.e > 1.0]
-            self.foods  = [f for f in self.foods if f.e > 1.0]
+            self.foods  = [f for f in self.foods if f.energy > 1.0]
 
             if newborns:
                 self.agents.extend(newborns)
@@ -977,4 +1040,6 @@ __all__ = [
     "SEASON_AMPLITUDE",
     "HAZARD_STRENGTH",
     "HAZARD_COVERAGE",
+    "FOOD_TYPE_ENERGIES",
+    "FOOD_TYPE_WEIGHTS",
 ]

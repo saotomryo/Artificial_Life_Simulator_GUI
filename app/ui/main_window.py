@@ -356,6 +356,13 @@ class WorldViewWidget(QWidget):
         super().__init__(parent)
         self._frame: Dict | None = None
         self.setMinimumSize(420, 420)
+        self._food_colors = [
+            QColor(70, 200, 120),
+            QColor(110, 180, 240),
+            QColor(240, 200, 90),
+            QColor(230, 140, 200),
+            QColor(170, 140, 255),
+        ]
 
     def update_frame(self, frame: Dict | None) -> None:
         self._frame = frame
@@ -389,11 +396,14 @@ class WorldViewWidget(QWidget):
 
         # Draw foods
         painter.setPen(Qt.NoPen)
-        painter.setBrush(QBrush(QColor(70, 200, 120)))
         for food in frame.get("foods", []):
             fx, fy = to_px(float(food.get("x", 0.0)), float(food.get("y", 0.0)))
-            size = max(2.0, 4.0 * scale)
-            painter.drawRect(QRectF(fx - size / 2.0, fy - size / 2.0, size, size))
+            food_type = int(food.get("type", 0))
+            energy = float(food.get("energy", 50.0))
+            color = self._food_colors[food_type % len(self._food_colors)]
+            painter.setBrush(QBrush(color))
+            size = max(2.0, 3.0 * scale + 0.015 * energy * scale)
+            painter.drawEllipse(QRectF(fx - size / 2.0, fy - size / 2.0, size, size))
 
         # Draw bodies
         painter.setBrush(QBrush(QColor(170, 110, 60, 180)))
