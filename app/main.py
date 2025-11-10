@@ -5,6 +5,10 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+if __package__ in {None, ""}:
+    # Allow running via ``python app/main.py`` by adding the repo root to sys.path
+    sys.path.append(str(Path(__file__).resolve().parents[1]))
+
 from PySide6.QtWidgets import QApplication
 
 from app.core import (
