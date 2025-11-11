@@ -1,10 +1,10 @@
 {
   "initial_food_pieces": 1000,
   "initial_food_scale": true,
-  "food_spawn_rate": 0.15,
-  "food_energy": 50.0,
+  "food_spawn_rate": 0.11,
+  "food_energy": 80.0,
   "decay_body_rate": 0.995,
-  "food_density_variation": 0.49999999999999994,
+  "food_density_variation": 0.5,
   "food_type_energies": [
     30.0,
     40.0,

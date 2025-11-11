@@ -89,6 +89,9 @@ KMEANS_MAX_K    = 5    # last10<=10 のためクラスタ数上限
 KMEANS_ITERS    = 50
 KMEANS_TRIES    = 6    # 初期化マルチトライ（ベストSSE）
 
+STAGNATION_TICKS_BEFORE_RESET = 600
+SINGLETON_TICKS_BEFORE_RESET = 200
+
 rng  = np.random.default_rng(1)
 rand = random.Random(1)
 
@@ -142,7 +145,7 @@ INNOV_DB = InnovationDB()
 NEXT_NODE_ID = 1000  # 入出力以外はここから採番
 
 class Genome:
-    def __init__(self, in_ids: List[int], out_ids: List[int]):
+    def __init__(self, in_ids: List[int], out_ids: List[int], *, fission_trait: Optional[float] = None):
         self.nodes: Dict[int, NodeGene] = {}
         self.conns: Dict[int, ConnGene] = {}
         for nid in in_ids:
@@ -153,9 +156,11 @@ class Genome:
         self.topo_order: List[int] = []
         self.in_ids = list(in_ids)
         self.out_ids = list(out_ids)
+        base_trait = 1.0 if fission_trait is None else fission_trait
+        self.fission_trait = float(np.clip(base_trait, 0.2, 3.0))
 
     def clone(self) -> 'Genome':
-        g = Genome(self.in_ids, self.out_ids)
+        g = Genome(self.in_ids, self.out_ids, fission_trait=self.fission_trait)
         g.nodes = {nid: NodeGene(n.id, n.type, n.bias) for nid,n in self.nodes.items()}
         g.conns = {innov: ConnGene(c.innov, c.in_id, c.out_id, c.w, c.enabled) for innov,c in self.conns.items()}
         g.topo_cache_valid = False
@@ -213,6 +218,7 @@ class Genome:
         if rand.random() < P_ADD_NODE: self.add_node()
         if rand.random() < P_DEL_CONN: self.del_connection()
         self.mutate_weights()
+        self._mutate_traits(0.08)
 
     # ---------- 軽量（微小）変異 ----------
     def micro_mutate(self,
@@ -229,7 +235,11 @@ class Genome:
         for n in child.nodes.values():
             n.bias += rng.normal(0, weight_sigma * 0.5)
         child.topo_cache_valid = False
+        child._mutate_traits(0.05)
         return child
+
+    def _mutate_traits(self, sigma: float) -> None:
+        self.fission_trait = float(np.clip(self.fission_trait + rng.normal(0, sigma), 0.2, 3.0))
 
     # ---------- 交叉 ----------
     @staticmethod
@@ -254,6 +264,8 @@ class Genome:
                 dst = (ga.nodes.get(gene.out_id) or gb.nodes.get(gene.out_id))
                 child.nodes[gene.out_id] = NodeGene(dst.id, dst.type, dst.bias)
         child.topo_cache_valid = False
+        trait_parent = ga if rand.random() < 0.5 else gb
+        child.fission_trait = float(trait_parent.fission_trait)
         return child
 
     # ---------- 推論 ----------
@@ -328,12 +340,13 @@ class Genome:
             "nodes": [asdict(n) for n in self.nodes.values()],
             "conns": [asdict(c) for c in self.conns.values()],
             "in_ids": self.in_ids,
-            "out_ids": self.out_ids
+            "out_ids": self.out_ids,
+            "fission_trait": self.fission_trait,
         }
 
     @staticmethod
     def from_dict(d: dict) -> 'Genome':
-        g = Genome(INPUT_IDS, OUTPUT_IDS)
+        g = Genome(INPUT_IDS, OUTPUT_IDS, fission_trait=d.get("fission_trait", 1.0))
         g.nodes = {n["id"]: NodeGene(**n) for n in d["nodes"]}
         g.conns = {c["innov"]: ConnGene(**c) for c in d["conns"]}
         for nid in INPUT_IDS:
@@ -353,7 +366,7 @@ INPUT_IDS  = list(range(0, IN_FEATURES))
 OUTPUT_IDS = list(range(100, 100+OUT_FEATURES))
 
 def brain_init_genome() -> Genome:
-    g = Genome(INPUT_IDS, OUTPUT_IDS)
+    g = Genome(INPUT_IDS, OUTPUT_IDS, fission_trait=float(np.clip(rng.normal(1.0, 0.15), 0.2, 3.0)))
     for i in INPUT_IDS:
         for o in OUTPUT_IDS:
             if rand.random() < 0.2:
@@ -382,7 +395,7 @@ class Body:
     e: float
 
 class Agent:
-    __slots__ = ("x","y","vx","vy","S","E","brain","base_color","eaten_units")
+    __slots__ = ("x","y","vx","vy","S","E","brain","base_color","eaten_units","fission_trait","fission_heat")
     def __init__(self, genome: Optional[Genome]=None):
         self.x = rng.uniform(0, W)
         self.y = rng.uniform(0, H)
@@ -394,6 +407,8 @@ class Agent:
         self.brain: Genome = genome if genome is not None else brain_init_genome()
         self.base_color = self._color_from_genome()
         self.eaten_units = 0.0
+        self.fission_trait = float(np.clip(getattr(self.brain, "fission_trait", 1.0), 0.2, 3.0))
+        self.fission_heat = 0.0
 
     def _color_from_genome(self):
         key = 0
@@ -468,6 +483,19 @@ class Agent:
         is_idle_cmd   = (abs(thrust) < IDLE_THRUST_TH and abs(turn) < IDLE_TURN_TH)
         idle_cost = IDLE_COST if (is_idle_speed and is_idle_cmd) else 0.0
 
+        if is_idle_speed:
+            noise_theta = rng.uniform(-math.pi, math.pi)
+            noise_mag = rng.uniform(0.1, 0.25) * vmax
+            self.vx += noise_mag * math.cos(noise_theta)
+            self.vy += noise_mag * math.sin(noise_theta)
+            noise_spd = math.hypot(self.vx, self.vy)
+            if noise_spd > vmax:
+                scale = vmax / max(1e-6, noise_spd)
+                self.vx *= scale
+                self.vy *= scale
+            self.x = wrap(self.x + self.vx * DT, W)
+            self.y = wrap(self.y + self.vy * DT, H)
+
         self.E -= (move_cost + brain_cost + base_cost + starvation_cost + idle_cost)
 
         return attack, mate, eat_strength, spd, vmax
@@ -488,15 +516,11 @@ class World:
         self._hazard_field: Optional[np.ndarray] = None
         self._hazard_damage_scale: float = 0.0
         self._init_hazard_field()
+        self._stagnation_ticks = 0
+        self._singleton_ticks = 0
 
         # 初期フードのばら撒き（足りない初期餌問題の対策）
-        if INITIAL_FOOD_SCALE:
-            # 面積 2000x2000 を基準にスケール
-            area_scale = (W * H) / (2000.0 * 2000.0)
-            n_seed = int(INITIAL_FOOD_PIECES * area_scale)
-        else:
-            n_seed = int(INITIAL_FOOD_PIECES)
-        self._seed_food(n_seed)
+        self._seed_initial_food()
 
         if from_last10 and os.path.exists(LAST10_PATH):
             data = self._load_last10()
@@ -552,6 +576,39 @@ class World:
             x, y = self._random_food_position()
             type_id, energy = self._choose_food_type()
             self.foods.append(Food(x, y, energy, type_id, energy))
+
+    def _seed_initial_food(self) -> None:
+        if INITIAL_FOOD_SCALE:
+            # 面積 2000x2000 を基準にスケール
+            area_scale = (W * H) / (2000.0 * 2000.0)
+            n_seed = int(INITIAL_FOOD_PIECES * area_scale)
+        else:
+            n_seed = int(INITIAL_FOOD_PIECES)
+        self._seed_food(n_seed)
+
+    def reset_food_supply(self) -> None:
+        """個体が途絶えたときに初期フード密度へ戻す。"""
+        self.foods.clear()
+        self._seed_initial_food()
+
+    def _reseed_population(self, reason: str) -> None:
+        data = self._load_last10()
+        if data:
+            print(f"[{reason}] reseed from last10 (diverse) -> {N_INIT}")
+            self._bootstrap_from_last10_diverse(data, N_INIT)
+        else:
+            print(f"[{reason}] random reinit -> {N_INIT}")
+            self.agents = [Agent() for _ in range(N_INIT)]
+        for agent in self.agents:
+            agent.x = rng.uniform(0, W)
+            agent.y = rng.uniform(0, H)
+            ang = rng.uniform(0, math.tau)
+            spd = rng.uniform(0, SPEED_MAX_BASE * 0.4)
+            agent.vx = spd * math.cos(ang)
+            agent.vy = spd * math.sin(ang)
+            agent.eaten_units = 0.0
+            agent.fission_heat = 0.0
+            agent.E = max(agent.E, 200.0)
 
     def _init_food_types(self) -> None:
         energies = np.array(FOOD_TYPE_ENERGIES, dtype=np.float32)
@@ -691,6 +748,9 @@ class World:
             self.insert_grid()
 
             intents = [a.step(self.neighbors(a, R_SENSE), self._food_hint(a)) for a in self.agents]
+            for a in self.agents:
+                if a.fission_heat > 0.0:
+                    a.fission_heat = max(0.0, a.fission_heat - 0.05)
 
             # 食餌・死体スカベンジ
             for i,a in enumerate(self.agents):
@@ -745,19 +805,29 @@ class World:
                                 self.bodies.append(Body(b.x, b.y, BODY_INIT_EN)); deaths_this += 1
 
             # 分裂（無性）
-            fission_bias = max(0.1, FISSION_RATE_FACTOR)
-            energy_th = FISSION_ENERGY_TH / fission_bias
-            food_th = FISSION_FOOD_UNITS_TH / fission_bias
-            parent_cost = max(5.0, FISSION_PARENT_COST / fission_bias)
-            child_energy = max(40.0, FISSION_CHILD_EN * min(2.0, fission_bias))
+            base_fission_bias = max(0.1, FISSION_RATE_FACTOR)
 
             for i,a in enumerate(self.agents):
-                if i in removed or a.E <= 0: continue
+                if i in removed or a.E <= 0:
+                    continue
+                indiv_bias = max(0.1, base_fission_bias * a.fission_trait)
+                heat_factor = 1.0 + 0.35 * a.fission_heat
+                energy_th = (FISSION_ENERGY_TH / indiv_bias) * heat_factor
+                food_th = (FISSION_FOOD_UNITS_TH / indiv_bias) * heat_factor
+                parent_cost = max(5.0, (FISSION_PARENT_COST / indiv_bias) * (1.0 + 0.15 * a.fission_heat))
+                child_energy = max(40.0, (FISSION_CHILD_EN * min(2.0, indiv_bias)) / (1.0 + 0.1 * a.fission_heat))
                 if a.E > energy_th and a.eaten_units >= food_th:
-                    child_g = a.brain.clone().micro_mutate(weight_sigma=0.03, p_add_conn=0.04, p_add_node=0.015, p_del_conn=0.008)
-                    child = Agent(child_g); child.x, child.y = a.x, a.y; child.E = child_energy
-                    a.E -= parent_cost; a.eaten_units = 0.0
-                    newborns.append(child); births_this += 1
+                    child_g = a.brain.clone().micro_mutate(
+                        weight_sigma=0.03, p_add_conn=0.04, p_add_node=0.015, p_del_conn=0.008
+                    )
+                    child = Agent(child_g)
+                    child.x, child.y = a.x, a.y
+                    child.E = child_energy
+                    a.E -= parent_cost
+                    a.eaten_units = 0.0
+                    a.fission_heat = min(2.0, a.fission_heat + 0.8)
+                    newborns.append(child)
+                    births_this += 1
 
             # 危険ゾーンによるダメージ
             if self._hazard_field is not None and HAZARD_STRENGTH > 0.0:
@@ -791,6 +861,7 @@ class World:
 
             # 絶滅時：last10 からクラスタ均等サンプルで再播種
             if not self.agents:
+                self.reset_food_supply()
                 data = self._load_last10()
                 if data:
                     print(f"[extinct] reseed from last10 (diverse) -> {N_INIT}")
@@ -800,13 +871,35 @@ class World:
                     self.agents = [Agent() for _ in range(N_INIT)]
 
         self.births += births_this; self.deaths += deaths_this
+        if births_this == 0 and deaths_this == 0:
+            self._stagnation_ticks += 1
+        else:
+            self._stagnation_ticks = 0
+
+        if len(self.agents) <= 1:
+            self._singleton_ticks += 1
+        else:
+            self._singleton_ticks = 0
+
+        if self._singleton_ticks >= SINGLETON_TICKS_BEFORE_RESET:
+            self._singleton_ticks = 0
+            self._stagnation_ticks = 0
+            self.reset_food_supply()
+            self._reseed_population("singleton reset")
+            return
+
+        if self._stagnation_ticks >= STAGNATION_TICKS_BEFORE_RESET:
+            self._stagnation_ticks = 0
+            self.reset_food_supply()
+            self._reseed_population("stagnation reset")
+            return
 
     # ---------- 最後の10個体 保存/復元 ----------
     def snapshot_topK(self) -> List[dict]:
         top = sorted(self.agents, key=lambda a: a.E, reverse=True)[:SAVE_TOP_K]
         pack = []
         for a in top:
-            pack.append({"genome": a.brain.to_dict(), "S": a.S})
+            pack.append({"genome": a.brain.to_dict(), "S": a.S, "fission_trait": a.fission_trait})
         return pack
 
     def save_last10(self):

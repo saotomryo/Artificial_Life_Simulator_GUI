@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 import json
+import csv
 from copy import deepcopy
+from datetime import datetime
 from pathlib import Path
-from typing import Callable, Dict, Optional, Tuple, Union
+from shutil import copy2
+from typing import Callable, Dict, Optional, Sequence, Tuple, Union
 
-from PySide6.QtCore import Qt, QRectF, Signal
+from PySide6.QtCore import Qt, QRectF, Signal, QTimer
 from PySide6.QtGui import QBrush, QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -25,7 +28,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from dataclasses import asdict
+from dataclasses import dataclass, asdict
 
 from app.core.config import SimulationConfig
 from app.core.controller import SimulationController
@@ -428,6 +431,153 @@ class WorldViewWidget(QWidget):
         painter.end()
 
 
+@dataclass
+class RecordedFrame:
+    stats: Dict
+    frame: Dict | None
+
+
+class ActionRecorder:
+    """Keeps a sequence of state snapshots for later playback."""
+
+    def __init__(self) -> None:
+        self._recording = False
+        self._frames: list[RecordedFrame] = []
+
+    def start(self) -> None:
+        self._frames.clear()
+        self._recording = True
+
+    def stop(self) -> None:
+        self._recording = False
+
+    def record(self, stats: Dict, frame: Dict | None) -> None:
+        if not self._recording:
+            return
+        self._frames.append(RecordedFrame(stats=deepcopy(stats), frame=deepcopy(frame) if frame else None))
+
+    @property
+    def is_recording(self) -> bool:
+        return self._recording
+
+    @property
+    def has_frames(self) -> bool:
+        return bool(self._frames)
+
+    @property
+    def frame_count(self) -> int:
+        return len(self._frames)
+
+    @property
+    def frames(self) -> Sequence[RecordedFrame]:
+        return self._frames
+
+    def export_payload(self) -> Dict:
+        return {
+            "version": 1,
+            "frame_count": len(self._frames),
+            "frames": [{"stats": frame.stats, "frame": frame.frame} for frame in self._frames],
+        }
+
+
+@dataclass
+class StatsSample:
+    tick: int
+    population: int
+    mean_energy: float
+    births: int
+    deaths: int
+    food: int
+    bodies: int
+    agents_in_frame: int
+    avg_agent_energy: float
+    avg_agent_size: float
+    foods_in_frame: int
+    avg_food_energy: float
+
+
+class StatsRecorder:
+    """Collects lightweight metrics for offline analysis."""
+
+    def __init__(self) -> None:
+        self._samples: list[StatsSample] = []
+
+    def record(self, stats: Dict, frame: Dict | None) -> None:
+        agents = frame.get("agents", []) if frame else []
+        foods = frame.get("foods", []) if frame else []
+        bodies = frame.get("bodies", []) if frame else []
+        avg_agent_energy = (
+            sum(float(agent.get("energy", 0.0)) for agent in agents) / len(agents) if agents else 0.0
+        )
+        avg_agent_size = (
+            sum(float(agent.get("size", 0.0)) for agent in agents) / len(agents) if agents else 0.0
+        )
+        avg_food_energy = (
+            sum(float(food.get("energy", 0.0)) for food in foods) / len(foods) if foods else 0.0
+        )
+        sample = StatsSample(
+            tick=int(stats.get("tick", 0)),
+            population=int(stats.get("population", 0)),
+            mean_energy=float(stats.get("mean_energy", 0.0)),
+            births=int(stats.get("births", 0)),
+            deaths=int(stats.get("deaths", 0)),
+            food=int(stats.get("food", 0)),
+            bodies=int(stats.get("bodies", 0)),
+            agents_in_frame=len(agents),
+            avg_agent_energy=avg_agent_energy,
+            avg_agent_size=avg_agent_size,
+            foods_in_frame=len(foods),
+            avg_food_energy=avg_food_energy,
+        )
+        self._samples.append(sample)
+
+    def clear(self) -> None:
+        self._samples.clear()
+
+    def has_data(self) -> bool:
+        return bool(self._samples)
+
+    def sample_count(self) -> int:
+        return len(self._samples)
+
+    def export_csv(self, path: Path) -> None:
+        headers = [
+            "tick",
+            "population",
+            "mean_energy",
+            "births",
+            "deaths",
+            "food_resources",
+            "bodies",
+            "agents_in_frame",
+            "avg_agent_energy",
+            "avg_agent_size",
+            "foods_in_frame",
+            "avg_food_energy",
+        ]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with path.open("w", newline="") as fh:
+            writer = csv.writer(fh)
+            writer.writerow(headers)
+            for sample in self._samples:
+                writer.writerow(
+                    [
+                        sample.tick,
+                        sample.population,
+                        f"{sample.mean_energy:.4f}",
+                        sample.births,
+                        sample.deaths,
+                        sample.food,
+                        sample.bodies,
+                        sample.agents_in_frame,
+                        f"{sample.avg_agent_energy:.4f}",
+                        f"{sample.avg_agent_size:.4f}",
+                        sample.foods_in_frame,
+                        f"{sample.avg_food_energy:.4f}",
+                    ]
+                )
+
+
 class MainWindow(QMainWindow):
     def __init__(self, controller: SimulationController, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -436,6 +586,14 @@ class MainWindow(QMainWindow):
         self._file_filter = "JSON ファイル (*.json);;すべてのファイル (*)"
         self.setWindowTitle("人工生命シミュレーター")
         self.resize(1200, 800)
+        self._recorder = ActionRecorder()
+        self._playback_timer = QTimer(self)
+        self._playback_timer.setInterval(75)
+        self._playback_timer.timeout.connect(self._advance_playback)
+        self._playback_index = 0
+        self._playback_active = False
+        self._stats_recorder = StatsRecorder()
+
         self._build_menu()
         self._build_ui()
         self._connect_signals()
@@ -481,10 +639,22 @@ class MainWindow(QMainWindow):
         self.stop_button.setEnabled(False)
         self.save_button = QPushButton("個体を保存")
         self.load_button = QPushButton("個体を読み込み")
+        self.record_button = QPushButton("記録開始")
+        self.record_button.setCheckable(True)
+        self.playback_button = QPushButton("再生")
+        self.playback_button.setCheckable(True)
+        self.playback_button.setEnabled(False)
+        self.export_record_button = QPushButton("記録を保存")
+        self.export_record_button.setEnabled(False)
+        self.export_stats_button = QPushButton("統計を保存")
         button_row.addWidget(self.start_button)
         button_row.addWidget(self.stop_button)
         button_row.addWidget(self.save_button)
         button_row.addWidget(self.load_button)
+        button_row.addWidget(self.record_button)
+        button_row.addWidget(self.playback_button)
+        button_row.addWidget(self.export_record_button)
+        button_row.addWidget(self.export_stats_button)
         right_layout.addLayout(button_row)
 
         self.log_output = QTextEdit()
@@ -506,6 +676,10 @@ class MainWindow(QMainWindow):
         self.stop_button.clicked.connect(self.stop_simulation)
         self.save_button.clicked.connect(self.save_agents_snapshot)
         self.load_button.clicked.connect(self.load_agents_snapshot)
+        self.record_button.toggled.connect(self._toggle_recording)
+        self.playback_button.toggled.connect(self._toggle_playback)
+        self.export_record_button.clicked.connect(self._export_recording)
+        self.export_stats_button.clicked.connect(self._export_stats)
         self.parameter_editor.section_save_requested.connect(self._on_section_save_requested)
         self.parameter_editor.section_load_requested.connect(self._on_section_load_requested)
         self.controller.state_updated.connect(self._on_state_updated)
@@ -517,6 +691,7 @@ class MainWindow(QMainWindow):
     def start_simulation(self) -> None:
         cfg = self.parameter_editor.value()
         self.controller.update_config(cfg)
+        self._stats_recorder.clear()
         try:
             self.controller.start()
         except Exception as exc:  # pragma: no cover - UI feedback
@@ -532,17 +707,20 @@ class MainWindow(QMainWindow):
             return
         try:
             path = path.resolve()
+            backup = self._backup_existing_file(path)
             data_path = Path(self.controller.save_agents()).resolve()
-            if data_path != path:
-                try:
-                    content = data_path.read_text()
-                    path.write_text(content)
-                finally:
-                    if data_path.exists():
-                        data_path.unlink()
+            path.parent.mkdir(parents=True, exist_ok=True)
+            if data_path == path:
+                pass
+            else:
+                copy2(data_path, path)
+                if data_path.exists():
+                    data_path.unlink()
         except Exception as exc:  # pragma: no cover - UI feedback
             QMessageBox.critical(self, "保存に失敗しました", str(exc))
             return
+        if backup is not None:
+            self._append_log(f"{backup.name} に過去の個体データを退避しました")
         self._append_log(f"個体スナップショットを {path} に保存しました")
         self.statusBar().showMessage(f"個体スナップショットを {path} に保存しました", 5000)
         self.state_manager.set_agent_file(path)
@@ -575,13 +753,9 @@ class MainWindow(QMainWindow):
             stats = dict(payload)
             frame = stats.pop("frame", None)
 
-        tick = int(stats.get("tick", 0))
-        population = int(stats.get("population", 0))
-        mean_energy = float(stats.get("mean_energy", 0.0))
-        self.status_label.setText(f"経過Tick: {tick} | 個体数: {population} | 平均エネルギー: {mean_energy:.1f}")
-        self.stats_widget.update_stats(stats)
-        if frame:
-            self.world_view.update_frame(frame)
+        self._render_state(stats, frame)
+        self._recorder.record(stats, frame)
+        self._stats_recorder.record(stats, frame)
 
     def _on_config_changed(self, config_dict: Dict) -> None:
         self._append_log("設定を更新しました。")
@@ -606,7 +780,148 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802
         if self.controller:
             self.controller.stop()
+        self._stop_playback()
         super().closeEvent(event)
+
+    def _backup_existing_file(self, path: Path) -> Optional[Path]:
+        if not path.exists():
+            return None
+        timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        suffix = path.suffix or ".json"
+        stem = path.stem or "snapshot"
+        backup = path.with_name(f"{stem}_{timestamp}{suffix}")
+        counter = 1
+        while backup.exists():
+            backup = path.with_name(f"{stem}_{timestamp}_{counter}{suffix}")
+            counter += 1
+        path.rename(backup)
+        return backup
+
+    def _render_state(self, stats: Dict, frame: Dict | None) -> None:
+        tick = int(stats.get("tick", 0))
+        population = int(stats.get("population", 0))
+        mean_energy = float(stats.get("mean_energy", 0.0))
+        self.status_label.setText(f"経過Tick: {tick} | 個体数: {population} | 平均エネルギー: {mean_energy:.1f}")
+        self.stats_widget.update_stats(stats)
+        if frame:
+            self.world_view.update_frame(frame)
+
+    def _toggle_recording(self, checked: bool) -> None:
+        if checked:
+            if self._playback_active:
+                self._stop_playback()
+            self._recorder.start()
+            self.record_button.setText("記録停止")
+            self.playback_button.setEnabled(False)
+            self.export_record_button.setEnabled(False)
+            self._append_log("行動の記録を開始しました。")
+            self.statusBar().showMessage("行動の記録を開始しました", 3000)
+            return
+
+        self._recorder.stop()
+        self.record_button.setText("記録開始")
+        frames = self._recorder.frame_count
+        self._append_log(f"行動の記録を停止しました（{frames} フレーム）")
+        self.statusBar().showMessage(f"行動の記録を停止しました（{frames} フレーム）", 5000)
+        self._update_recording_controls()
+
+    def _toggle_playback(self, checked: bool) -> None:
+        if checked:
+            if not self._recorder.has_frames:
+                QMessageBox.information(self, "再生できません", "再生可能な記録がありません。")
+                self.playback_button.blockSignals(True)
+                self.playback_button.setChecked(False)
+                self.playback_button.blockSignals(False)
+                return
+            self.controller.stop()
+            self._start_playback()
+            return
+        self._stop_playback()
+
+    def _start_playback(self) -> None:
+        self._playback_index = 0
+        self._playback_active = True
+        self._playback_timer.start()
+        self.playback_button.setText("再生停止")
+        self.record_button.setEnabled(False)
+        self.export_record_button.setEnabled(False)
+        self.start_button.setEnabled(False)
+        self.stop_button.setEnabled(False)
+        self._start_action.setEnabled(False)
+        self._stop_action.setEnabled(False)
+        self.statusBar().showMessage("記録を再生しています…")
+        self._append_log("記録の再生を開始しました。")
+
+    def _stop_playback(self) -> None:
+        if not self._playback_active:
+            self.playback_button.blockSignals(True)
+            self.playback_button.setChecked(False)
+            self.playback_button.blockSignals(False)
+            self.playback_button.setText("再生")
+            self.record_button.setEnabled(True)
+            self._update_recording_controls()
+            return
+        self._playback_timer.stop()
+        self._playback_active = False
+        self._playback_index = 0
+        self.playback_button.blockSignals(True)
+        self.playback_button.setChecked(False)
+        self.playback_button.blockSignals(False)
+        self.playback_button.setText("再生")
+        self.record_button.setEnabled(True)
+        self.start_button.setEnabled(True)
+        self.stop_button.setEnabled(False)
+        self._start_action.setEnabled(True)
+        self._stop_action.setEnabled(False)
+        self.statusBar().showMessage("記録の再生を停止しました", 3000)
+        self._append_log("記録の再生を停止しました。")
+        self._update_recording_controls()
+
+    def _advance_playback(self) -> None:
+        frames = self._recorder.frames
+        if self._playback_index >= len(frames):
+            self._stop_playback()
+            return
+        frame = frames[self._playback_index]
+        self._render_state(frame.stats, frame.frame)
+        self._playback_index += 1
+        if self._playback_index >= len(frames):
+            self._stop_playback()
+
+    def _update_recording_controls(self) -> None:
+        enabled = self._recorder.has_frames and not self._recorder.is_recording and not self._playback_active
+        self.playback_button.setEnabled(enabled)
+        self.export_record_button.setEnabled(enabled)
+
+    def _export_recording(self) -> None:
+        if not self._recorder.has_frames:
+            QMessageBox.information(self, "保存できません", "保存可能な記録がありません。")
+            return
+        suggested = Path.cwd() / "simulation_recording.json"
+        path = self._get_save_path("記録を保存", suggested)
+        if path is None:
+            return
+        data = self._recorder.export_payload()
+        if self._write_json(path, data):
+            frames = self._recorder.frame_count
+            self._append_log(f"記録を {path} に保存しました（{frames} フレーム）")
+            self.statusBar().showMessage(f"記録を {path} に保存しました", 5000)
+
+    def _export_stats(self) -> None:
+        if not self._stats_recorder.has_data():
+            QMessageBox.information(self, "保存できません", "保存可能な統計データがありません。")
+            return
+        suggested = Path.cwd() / "simulation_stats.csv"
+        path = self._get_save_path("統計を保存", suggested)
+        if path is None:
+            return
+        try:
+            self._stats_recorder.export_csv(path)
+        except Exception as exc:
+            QMessageBox.critical(self, "保存に失敗しました", f"統計データの書き込みに失敗しました:\n{exc}")
+            return
+        self._append_log(f"統計データを {path} に保存しました（{self._stats_recorder.sample_count()} 行）")
+        self.statusBar().showMessage(f"統計データを {path} に保存しました", 5000)
 
     def _on_section_save_requested(self, section: str) -> None:
         label = self.parameter_editor.section_label(section)
