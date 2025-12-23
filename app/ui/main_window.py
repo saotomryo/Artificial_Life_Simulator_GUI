@@ -34,6 +34,7 @@ from dataclasses import dataclass, asdict
 from app.core.config import SimulationConfig
 from app.core.controller import SimulationController
 from app.state_manager import StateManager
+from app.ui.stats_viewer import StatsViewerWindow
 
 NumberWidget = Union[QDoubleSpinBox, QSpinBox]
 
@@ -801,6 +802,7 @@ class MainWindow(QMainWindow):
         self.setWindowTitle("人工生命シミュレーター")
         self.resize(1200, 800)
         self._stats_recorder = StatsRecorder()
+        self._stats_viewer: StatsViewerWindow | None = None
 
         self._build_menu()
         self._build_ui()
@@ -809,6 +811,8 @@ class MainWindow(QMainWindow):
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("ファイル(&F)")
+        stats_action = file_menu.addAction("統計ビューア…")
+        stats_action.triggered.connect(self._open_stats_viewer)
         exit_action = file_menu.addAction("終了(&X)")
         exit_action.triggered.connect(self.close)
 
@@ -1014,6 +1018,18 @@ class MainWindow(QMainWindow):
             return
         self._append_log(f"統計データを {path} に保存しました（{self._stats_recorder.sample_count()} 行）")
         self.statusBar().showMessage(f"統計データを {path} に保存しました", 5000)
+
+    def _open_stats_viewer(self) -> None:
+        suggested = Path.cwd() / "simulation_stats.csv"
+        path = self._get_open_path("統計CSVを開く", suggested if suggested.exists() else None)
+        if path is None:
+            return
+        if self._stats_viewer is None:
+            self._stats_viewer = StatsViewerWindow(parent=self)
+        self._stats_viewer.load_csv(path)
+        self._stats_viewer.show()
+        self._stats_viewer.raise_()
+        self._stats_viewer.activateWindow()
 
     def _on_section_save_requested(self, section: str) -> None:
         label = self.parameter_editor.section_label(section)
