@@ -89,18 +89,20 @@ class SimulationController(QObject):
         self.log_emitted.emit(f"{path} から個体を読み込みました。")
 
     def _on_progress(self, state: SimulationState) -> None:
-        self.state_updated.emit(
-            {
-                "tick": state.tick,
-                "population": state.population,
-                "mean_energy": state.mean_energy,
-                "births": state.births,
-                "deaths": state.deaths,
-                "food": state.food_count,
-                "bodies": state.body_count,
-                "frame": state.frame,
-            }
-        )
+        payload = {
+            "tick": state.tick,
+            "population": state.population,
+            "mean_energy": state.mean_energy,
+            "births": state.births,
+            "deaths": state.deaths,
+            "food": state.food_count,
+            "bodies": state.body_count,
+            "frame": state.frame,
+        }
+        telemetry = getattr(state, "telemetry", None)
+        if isinstance(telemetry, dict):
+            payload.update(telemetry)
+        self.state_updated.emit(payload)
 
     def _on_worker_stopped(self) -> None:
         self.simulation_stopped.emit()

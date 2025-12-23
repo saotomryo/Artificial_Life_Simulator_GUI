@@ -52,6 +52,14 @@ IDLE_THRUST_TH          = 0.2        # 出力が弱い＝意図的に動いて�
 IDLE_TURN_TH            = 0.05
 IDLE_COST               = 0.45       # アイドル・ペナルティ（毎tick）
 
+ENABLE_ADVANCED_ACTIONS = False
+DASH_VMAX_MULT = 1.5
+DASH_COST = 0.35
+DEFEND_STRENGTH = 0.6
+DEFEND_COST = 0.25
+REST_BASE_COST_MULT = 0.4
+REST_COST = 0.05
+
 E_BIRTH_THRESHOLD       = 220.0
 PARENT_COST             = 80.0
 CHILD_EN                = 120.0
@@ -94,6 +102,14 @@ SINGLETON_TICKS_BEFORE_RESET = 200
 
 rng  = np.random.default_rng(1)
 rand = random.Random(1)
+
+NEXT_AGENT_ID = 1
+
+def _next_agent_id() -> int:
+    global NEXT_AGENT_ID
+    aid = NEXT_AGENT_ID
+    NEXT_AGENT_ID += 1
+    return aid
 
 # ===================== ユーティリティ =====================
 def wrap(v, L):
@@ -347,12 +363,15 @@ class Genome:
     @staticmethod
     def from_dict(d: dict) -> 'Genome':
         g = Genome(INPUT_IDS, OUTPUT_IDS, fission_trait=d.get("fission_trait", 1.0))
-        g.nodes = {n["id"]: NodeGene(**n) for n in d["nodes"]}
-        g.conns = {c["innov"]: ConnGene(**c) for c in d["conns"]}
-        for nid in INPUT_IDS:
+        g.nodes = {n["id"]: NodeGene(**n) for n in d.get("nodes", [])}
+        g.conns = {c["innov"]: ConnGene(**c) for c in d.get("conns", [])}
+        g.in_ids = list(d.get("in_ids", INPUT_IDS))
+        g.out_ids = list(d.get("out_ids", OUTPUT_IDS))
+        # Backward compatibility: ensure required input/output nodes exist.
+        for nid in g.in_ids:
             if nid not in g.nodes:
                 g.nodes[nid] = NodeGene(nid, INPUT, 0.0)
-        for nid in OUTPUT_IDS:
+        for nid in g.out_ids:
             if nid not in g.nodes:
                 g.nodes[nid] = NodeGene(nid, OUTPUT, 0.0)
         g.topo_cache_valid = False
@@ -361,7 +380,7 @@ class Genome:
 # ===================== 入出力ノード定義 =====================
 N_RAYS = 5
 IN_FEATURES = N_RAYS*3 + 6
-OUT_FEATURES = 5
+OUT_FEATURES = 8 if ENABLE_ADVANCED_ACTIONS else 5
 INPUT_IDS  = list(range(0, IN_FEATURES))
 OUTPUT_IDS = list(range(100, 100+OUT_FEATURES))
 
@@ -395,8 +414,56 @@ class Body:
     e: float
 
 class Agent:
-    __slots__ = ("x","y","vx","vy","S","E","brain","base_color","eaten_units","fission_trait","fission_heat")
-    def __init__(self, genome: Optional[Genome]=None):
+    __slots__ = (
+        "id",
+        "parent_id",
+        "parent2_id",
+        "birth_tick",
+        "age",
+        "x",
+        "y",
+        "vx",
+        "vy",
+        "S",
+        "E",
+        "brain",
+        "base_color",
+        "eaten_units",
+        "fission_trait",
+        "fission_heat",
+        "last_thrust",
+        "last_turn",
+        "last_attack",
+        "last_mate",
+        "last_eat_strength",
+        "last_hazard_damage",
+        "strategy_tag",
+        "food_energy_total",
+        "body_energy_total",
+        "attack_attempts_total",
+        "attack_successes_total",
+        "mate_attempts_total",
+        "mate_successes_total",
+        "fissions_total",
+        "last_dash",
+        "last_defend",
+        "last_rest",
+    )
+
+    def __init__(
+        self,
+        genome: Optional[Genome] = None,
+        *,
+        agent_id: Optional[int] = None,
+        birth_tick: int = 0,
+        parent_id: Optional[int] = None,
+        parent2_id: Optional[int] = None,
+    ):
+        self.id = int(_next_agent_id() if agent_id is None else agent_id)
+        self.parent_id = parent_id
+        self.parent2_id = parent2_id
+        self.birth_tick = int(birth_tick)
+        self.age = 0
         self.x = rng.uniform(0, W)
         self.y = rng.uniform(0, H)
         ang = rng.uniform(0, 2*np.pi)
@@ -409,6 +476,23 @@ class Agent:
         self.eaten_units = 0.0
         self.fission_trait = float(np.clip(getattr(self.brain, "fission_trait", 1.0), 0.2, 3.0))
         self.fission_heat = 0.0
+        self.last_thrust = 0.0
+        self.last_turn = 0.0
+        self.last_attack = False
+        self.last_mate = False
+        self.last_eat_strength = 0.0
+        self.last_hazard_damage = 0.0
+        self.strategy_tag = "Generalist"
+        self.food_energy_total = 0.0
+        self.body_energy_total = 0.0
+        self.attack_attempts_total = 0
+        self.attack_successes_total = 0
+        self.mate_attempts_total = 0
+        self.mate_successes_total = 0
+        self.fissions_total = 0
+        self.last_dash = False
+        self.last_defend = False
+        self.last_rest = False
 
     def _color_from_genome(self):
         key = 0
@@ -451,7 +535,7 @@ class Agent:
             x[INPUT_IDS[i]] = v
         return x
 
-    def step(self, neighbors: List['Agent'], food_hint: Optional[Tuple[float, float]] = None) -> Tuple[bool,bool,float,float,float]:
+    def step(self, neighbors: List['Agent'], food_hint: Optional[Tuple[float, float]] = None) -> Tuple[bool, bool, float, float, float, float, float]:
         x = self.sense(neighbors, food_hint)
         o = self.brain.forward(x)
         thrust = math.tanh(o[OUTPUT_IDS[0]])
@@ -459,10 +543,29 @@ class Agent:
         attack = o[OUTPUT_IDS[2]] > 0.5
         mate   = o[OUTPUT_IDS[3]] > 0.5
         eat_strength = float(max(0.0, min(1.0, o[OUTPUT_IDS[4]])))
+        dash = False
+        defend = False
+        rest = False
+        if ENABLE_ADVANCED_ACTIONS and len(OUTPUT_IDS) >= 8:
+            dash = o[OUTPUT_IDS[5]] > 0.5
+            defend = o[OUTPUT_IDS[6]] > 0.5
+            rest = o[OUTPUT_IDS[7]] > 0.5
+        self.last_dash = bool(dash)
+        self.last_defend = bool(defend)
+        self.last_rest = bool(rest)
+        self.last_thrust = float(thrust)
+        self.last_turn = float(turn)
+        self.last_attack = bool(attack)
+        self.last_mate = bool(mate)
+        self.last_eat_strength = float(eat_strength)
 
         theta = math.atan2(self.vy, self.vx + 1e-9) + turn
         vmax  = SPEED_MAX_BASE*(1.2 - 0.2*self.S)
+        if dash:
+            vmax *= float(max(1.0, DASH_VMAX_MULT))
         spd   = np.clip(math.hypot(self.vx, self.vy) + thrust, 0, vmax)
+        if rest:
+            spd = min(spd, 0.25 * vmax)
         self.vx, self.vy = spd*math.cos(theta), spd*math.sin(theta)
         self.x = wrap(self.x + self.vx*DT, W)
         self.y = wrap(self.y + self.vy*DT, H)
@@ -474,7 +577,9 @@ class Agent:
         move_cost  = MOVE_COST_K * spd * spd
         brain_cost = BRAIN_COST_PER_CONN * len(self.brain.conns)
 
-        base_cost  = BASE_COST
+        base_cost = BASE_COST
+        if rest:
+            base_cost *= float(np.clip(REST_BASE_COST_MULT, 0.0, 1.0))
 
         # 飢餓域での追加ドレイン（Eが閾値を下回ると常時発生）
         starvation_cost = STARVATION_COST if self.E < STARVATION_E else 0.0
@@ -496,9 +601,16 @@ class Agent:
             self.x = wrap(self.x + self.vx * DT, W)
             self.y = wrap(self.y + self.vy * DT, H)
 
-        self.E -= (move_cost + brain_cost + base_cost + starvation_cost + idle_cost)
+        extra_action_cost = 0.0
+        if dash:
+            extra_action_cost += float(max(0.0, DASH_COST))
+        if defend:
+            extra_action_cost += float(max(0.0, DEFEND_COST))
+        if rest:
+            extra_action_cost += float(max(0.0, REST_COST))
+        self.E -= (move_cost + brain_cost + base_cost + starvation_cost + idle_cost + extra_action_cost)
 
-        return attack, mate, eat_strength, spd, vmax
+        return attack, mate, eat_strength, spd, vmax, thrust, turn
 
 class World:
     def __init__(self, from_last10: bool=False):
@@ -518,6 +630,7 @@ class World:
         self._init_hazard_field()
         self._stagnation_ticks = 0
         self._singleton_ticks = 0
+        self.telemetry: Dict[str, float] = {}
 
         # 初期フードのばら撒き（足りない初期餌問題の対策）
         self._seed_initial_food()
@@ -528,7 +641,7 @@ class World:
                 self._bootstrap_from_last10_diverse(data, N_INIT)
 
         if not self.agents:
-            self.agents = [Agent() for _ in range(N_INIT)]
+            self.agents = [Agent(birth_tick=self.t) for _ in range(N_INIT)]
 
     # ---------- グリッド ----------
     def reset_grid(self):
@@ -598,7 +711,7 @@ class World:
             self._bootstrap_from_last10_diverse(data, N_INIT)
         else:
             print(f"[{reason}] random reinit -> {N_INIT}")
-            self.agents = [Agent() for _ in range(N_INIT)]
+            self.agents = [Agent(birth_tick=self.t) for _ in range(N_INIT)]
         for agent in self.agents:
             agent.x = rng.uniform(0, W)
             agent.y = rng.uniform(0, H)
@@ -740,6 +853,25 @@ class World:
 
     def tick(self, substeps=1):
         births_this = 0; deaths_this = 0
+        deaths_attack = 0
+        deaths_hazard = 0
+        deaths_energy = 0
+        attack_attempts = 0
+        attack_successes = 0
+        mate_attempts = 0
+        mate_successes = 0
+        fission_count = 0
+        eat_energy_food = 0.0
+        eat_energy_body = 0.0
+        eat_energy_by_type: Dict[int, float] = {}
+        mean_thrust = 0.0
+        mean_turn = 0.0
+        mean_eat_strength = 0.0
+        sum_speed = 0.0
+        count_alive_for_means = 0
+        dash_active = 0
+        defend_active = 0
+        rest_active = 0
         for _ in range(substeps):
             self.t += 1
             season_mult = self._season_multiplier()
@@ -751,11 +883,21 @@ class World:
             for a in self.agents:
                 if a.fission_heat > 0.0:
                     a.fission_heat = max(0.0, a.fission_heat - 0.05)
+                a.age = max(0, self.t - int(getattr(a, "birth_tick", 0)))
+                a.last_hazard_damage = 0.0
 
             # 食餌・死体スカベンジ
             for i,a in enumerate(self.agents):
                 if a.E <= 0: continue
-                attack, mate, eat_str, spd, vmax = intents[i]
+                attack, mate, eat_str, spd, vmax, thrust, turn = intents[i]
+                count_alive_for_means += 1
+                mean_thrust += float(thrust)
+                mean_turn += float(turn)
+                mean_eat_strength += float(eat_str)
+                sum_speed += float(spd) / max(1e-6, float(vmax))
+                dash_active += 1 if getattr(a, "last_dash", False) else 0
+                defend_active += 1 if getattr(a, "last_defend", False) else 0
+                rest_active += 1 if getattr(a, "last_rest", False) else 0
                 # 食餌
                 for f in self.foods:
                     dx = torus_delta(f.x - a.x, W); dy = torus_delta(f.y - a.y, H)
@@ -766,6 +908,9 @@ class World:
                         a.E += take
                         f.energy -= take
                         a.eaten_units += take / max(1.0, base)
+                        eat_energy_food += float(take)
+                        eat_energy_by_type[int(f.type_id)] = eat_energy_by_type.get(int(f.type_id), 0.0) + float(take)
+                        a.food_energy_total += float(take)
                 # 死体
                 for bdy in self.bodies:
                     dx = torus_delta(bdy.x - a.x, W); dy = torus_delta(bdy.y - a.y, H)
@@ -773,15 +918,17 @@ class World:
                         take = min(bdy.e, 10.0*(0.3 + 0.7*eat_str))
                         a.E += take; bdy.e -= take
                         a.eaten_units += take / FOOD_EN
+                        eat_energy_body += float(take)
+                        a.body_energy_total += float(take)
 
             # 近接相互作用（交配/攻撃/分裂）
             newborns: List[Agent] = []
-            removed = set()
+            removed: set[int] = set()
 
             # 交配・攻撃
             for i,a in enumerate(self.agents):
                 if i in removed or a.E <= 0: continue
-                attack_i, mate_i, eat_i, _, _ = intents[i]
+                attack_i, mate_i, eat_i, _, _, _, _ = intents[i]
                 neigh = self.neighbors(a, R_HIT*1.2)
                 for b in neigh:
                     if b is a: continue
@@ -791,18 +938,35 @@ class World:
                     if dx*dx + dy*dy < R_HIT*R_HIT:
                         # 交配
                         if mate_i and intents[j][1]:
+                            mate_attempts += 1
+                            a.mate_attempts_total += 1
+                            b.mate_attempts_total += 1
                             if a.E > E_BIRTH_THRESHOLD and b.E > E_BIRTH_THRESHOLD and self.is_compatible(a,b):
                                 child_g = Genome.crossover(a.brain, b.brain)
                                 child_g.structural_mutation()
-                                child = Agent(child_g); child.x, child.y = a.x, a.y; child.E = CHILD_EN
+                                child = Agent(
+                                    child_g,
+                                    birth_tick=self.t,
+                                    parent_id=int(getattr(a, "id", -1)),
+                                    parent2_id=int(getattr(b, "id", -1)),
+                                )
+                                child.x, child.y = a.x, a.y; child.E = CHILD_EN
                                 a.E -= PARENT_COST; b.E -= PARENT_COST
                                 newborns.append(child); births_this += 1
+                                mate_successes += 1
+                                a.mate_successes_total += 1
+                                b.mate_successes_total += 1
                         # 攻撃
                         if attack_i:
+                            attack_attempts += 1
+                            a.attack_attempts_total += 1
                             atk = 8.0*a.S; dfn = 5.0*b.S
+                            if getattr(b, "last_defend", False):
+                                dfn *= (1.0 + float(max(0.0, DEFEND_STRENGTH)))
                             if atk > dfn:
                                 a.E += 60.0; removed.add(j)
-                                self.bodies.append(Body(b.x, b.y, BODY_INIT_EN)); deaths_this += 1
+                                attack_successes += 1
+                                a.attack_successes_total += 1
 
             # 分裂（無性）
             base_fission_bias = max(0.1, FISSION_RATE_FACTOR)
@@ -820,7 +984,12 @@ class World:
                     child_g = a.brain.clone().micro_mutate(
                         weight_sigma=0.03, p_add_conn=0.04, p_add_node=0.015, p_del_conn=0.008
                     )
-                    child = Agent(child_g)
+                    child = Agent(
+                        child_g,
+                        birth_tick=self.t,
+                        parent_id=int(getattr(a, "id", -1)),
+                        parent2_id=None,
+                    )
                     child.x, child.y = a.x, a.y
                     child.E = child_energy
                     a.E -= parent_cost
@@ -828,6 +997,8 @@ class World:
                     a.fission_heat = min(2.0, a.fission_heat + 0.8)
                     newborns.append(child)
                     births_this += 1
+                    fission_count += 1
+                    a.fissions_total += 1
 
             # 危険ゾーンによるダメージ
             if self._hazard_field is not None and HAZARD_STRENGTH > 0.0:
@@ -838,15 +1009,27 @@ class World:
                     gy = int(a.y // CELL) % GRID_H
                     hazard = field[gy, gx]
                     if hazard > 0.0:
-                        a.E -= hazard * damage_scale
+                        dmg = float(hazard * damage_scale)
+                        if getattr(a, "last_defend", False):
+                            dmg *= float(np.clip(1.0 - DEFEND_STRENGTH, 0.0, 1.0))
+                        a.last_hazard_damage = dmg
+                        a.E -= dmg
 
             # 片付け
             keep = []
             for k,ag in enumerate(self.agents):
                 dead = (k in removed) or (ag.E <= 0)
                 if dead:
-                    self.bodies.append(Body(ag.x, ag.y, BODY_INIT_EN*(1.0 if k in removed else 0.5)))
                     deaths_this += 1
+                    if k in removed:
+                        deaths_attack += 1
+                        self.bodies.append(Body(ag.x, ag.y, BODY_INIT_EN))
+                    else:
+                        if float(getattr(ag, "last_hazard_damage", 0.0)) > 0.0:
+                            deaths_hazard += 1
+                        else:
+                            deaths_energy += 1
+                        self.bodies.append(Body(ag.x, ag.y, BODY_INIT_EN * 0.5))
                 else:
                     keep.append(ag)
             self.agents = keep
@@ -868,9 +1051,47 @@ class World:
                     self._bootstrap_from_last10_diverse(data, N_INIT)
                 else:
                     print("[extinct] no last10 -> random reinit")
-                    self.agents = [Agent() for _ in range(N_INIT)]
+                    self.agents = [Agent(birth_tick=self.t) for _ in range(N_INIT)]
 
         self.births += births_this; self.deaths += deaths_this
+        if count_alive_for_means > 0:
+            mean_thrust /= count_alive_for_means
+            mean_turn /= count_alive_for_means
+            mean_eat_strength /= count_alive_for_means
+            sum_speed /= count_alive_for_means
+        hazard_mean = 0.0
+        hazard_coverage = 0.0
+        if self._hazard_field is not None:
+            try:
+                hazard_mean = float(np.mean(self._hazard_field))
+                hazard_coverage = float(np.mean(self._hazard_field > 1e-6))
+            except Exception:
+                hazard_mean = 0.0
+                hazard_coverage = 0.0
+        self.telemetry = {
+            "season_mult": float(season_mult),
+            "attack_attempts": float(attack_attempts),
+            "attack_successes": float(attack_successes),
+            "mate_attempts": float(mate_attempts),
+            "mate_successes": float(mate_successes),
+            "fissions": float(fission_count),
+            "eat_energy_food": float(eat_energy_food),
+            "eat_energy_body": float(eat_energy_body),
+            "deaths_attack": float(deaths_attack),
+            "deaths_hazard": float(deaths_hazard),
+            "deaths_energy": float(deaths_energy),
+            "mean_thrust": float(mean_thrust),
+            "mean_turn": float(mean_turn),
+            "mean_eat_strength": float(mean_eat_strength),
+            "mean_speed_frac": float(sum_speed),
+            "dash_active": float(dash_active),
+            "defend_active": float(defend_active),
+            "rest_active": float(rest_active),
+            "hazard_mean": float(hazard_mean),
+            "hazard_coverage": float(hazard_coverage),
+        }
+        for type_id, energy in sorted(eat_energy_by_type.items()):
+            self.telemetry[f"eat_energy_food_t{int(type_id)}"] = float(energy)
         if births_this == 0 and deaths_this == 0:
             self._stagnation_ticks += 1
         else:
@@ -893,6 +1114,30 @@ class World:
             self.reset_food_supply()
             self._reseed_population("stagnation reset")
             return
+
+        self._update_strategy_tags()
+
+    def _update_strategy_tags(self) -> None:
+        for a in self.agents:
+            attack_attempts = int(getattr(a, "attack_attempts_total", 0))
+            attack_successes = int(getattr(a, "attack_successes_total", 0))
+            mate_successes = int(getattr(a, "mate_successes_total", 0))
+            fissions = int(getattr(a, "fissions_total", 0))
+            food_energy = float(getattr(a, "food_energy_total", 0.0))
+            body_energy = float(getattr(a, "body_energy_total", 0.0))
+
+            tags: list[str] = []
+            if fissions >= 3 and fissions >= mate_successes:
+                tags.append("Fissioner")
+            if attack_successes >= 3 and (attack_successes / max(1, attack_attempts)) >= 0.25:
+                tags.append("Predator")
+            if body_energy >= max(50.0, 1.5 * food_energy):
+                tags.append("Scavenger")
+            if food_energy >= max(50.0, 1.5 * body_energy):
+                tags.append("Forager")
+            if not tags:
+                tags.append("Generalist")
+            a.strategy_tag = "+".join(tags)
 
     # ---------- 最後の10個体 保存/復元 ----------
     def snapshot_topK(self) -> List[dict]:
@@ -943,7 +1188,7 @@ class World:
                 g_child = Genome.from_dict(base_item["genome"]).micro_mutate(
                     weight_sigma=0.03, p_add_conn=0.04, p_add_node=0.015, p_del_conn=0.008
                 )
-                a = Agent(g_child)
+                a = Agent(g_child, birth_tick=self.t)
                 a.S = float(base_item.get("S", a.S)) * float(np.clip(rng.normal(1.0, 0.03), 0.9, 1.1))
                 a.E = 220.0
                 self.agents.append(a)
@@ -988,14 +1233,14 @@ class World:
                 g_child = Genome.from_dict(item["genome"]).micro_mutate(
                     weight_sigma=0.03, p_add_conn=0.04, p_add_node=0.015, p_del_conn=0.008
                 )
-                a = Agent(g_child)
+                a = Agent(g_child, birth_tick=self.t)
                 a.S = float(item.get("S", a.S)) * float(np.clip(rng.normal(1.0, 0.03), 0.9, 1.1))
                 a.E = 220.0
                 self.agents.append(a)
                 progressed = True
             if not progressed:
                 # 保険：何も進まない場合はランダム増殖
-                self.agents.append(Agent())
+                self.agents.append(Agent(birth_tick=self.t))
 
         print(f"[diverse bootstrap] k={k} clusters sizes={[len(clusters[i]) for i in range(len(clusters))]}")
 
@@ -1117,7 +1362,7 @@ class World:
             self._bootstrap_from_last10_diverse(data, N_INIT)
         else:
             print("[reset] no last10 available -> random reinit")
-            self.agents = [Agent() for _ in range(N_INIT)]
+            self.agents = [Agent(birth_tick=self.t) for _ in range(N_INIT)]
 
 
 __all__ = [
