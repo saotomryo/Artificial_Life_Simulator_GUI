@@ -36,9 +36,24 @@ NEAT 風の可変構造脳を持つ個体シミュレーション（`app/sim/nea
 
 ---
 
-## 前提・依存パッケージ
+## セットアップ
+### 1. 仮想環境の作成
 ```bash
-pip install PySide6 numpy
+python -m venv .venv
+```
+
+### 2. 仮想環境の有効化
+```bash
+# macOS / Linux
+source .venv/bin/activate
+
+# Windows (PowerShell)
+.venv\Scripts\Activate.ps1
+```
+
+### 3. 依存パッケージのインストール
+```bash
+pip install -r requirements.txt
 ```
 ※ 旧ビューア（`old/evo_sim_neat_diverse.py`）を起動する場合のみ `pygame` が必要です。
 
