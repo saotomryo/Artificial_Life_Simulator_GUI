@@ -44,6 +44,12 @@ class MetabolismConfig:
     move_cost_k: float = 0.001
     brain_cost_per_conn: float = 0.0006
     fission_bias: float = 1.0
+    dash_vmax_mult: float = 1.5
+    dash_cost: float = 0.35
+    defend_strength: float = 0.6
+    defend_cost: float = 0.25
+    rest_base_cost_mult: float = 0.4
+    rest_cost: float = 0.05
 
 
 @dataclass
@@ -54,6 +60,7 @@ class BrainConfig:
     add_connection_rate: float = 0.20
     add_node_rate: float = 0.08
     delete_connection_rate: float = 0.02
+    enable_advanced_actions: bool = False
 
 
 @dataclass

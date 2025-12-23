@@ -6,7 +6,7 @@ import json
 import math
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
 from typing import Dict, Optional, Protocol
@@ -24,6 +24,7 @@ class SimulationState:
     food_count: int = 0
     body_count: int = 0
     frame: Dict | None = None
+    telemetry: Dict = field(default_factory=dict)
 
 
 class SimulationBackend(Protocol):
@@ -105,6 +106,7 @@ class StubSimulationBackend:
                 self._state.food_count = max(0, int(150 + 40 * math.sin(self._state.tick / 15.0)))
                 self._state.body_count = max(0, int(20 + 10 * math.cos(self._state.tick / 20.0)))
                 self._state.frame = self._fake_frame()
+                self._state.telemetry = {}
                 self._prev_population = self._state.population
         return self._state
 
@@ -124,6 +126,7 @@ class StubSimulationBackend:
                     "bodies": self._state.body_count,
                 },
                 "frame": self._state.frame,
+                "telemetry": self._state.telemetry,
             }
 
     def save_agents(self) -> Path:
@@ -265,6 +268,12 @@ class NeatSimulationBackend:
             mean_energy = (
                 sum(agent.E for agent in world.agents) / population if population > 0 else 0.0
             )
+            telemetry = {}
+            if hasattr(world, "telemetry"):
+                try:
+                    telemetry = dict(getattr(world, "telemetry"))
+                except Exception:
+                    telemetry = {}
             self._state.tick = world.t
             self._state.population = population
             self._state.mean_energy = mean_energy
@@ -273,6 +282,7 @@ class NeatSimulationBackend:
             self._state.food_count = len(getattr(world, "foods", []))
             self._state.body_count = len(getattr(world, "bodies", []))
             self._state.frame = self._capture_frame(world)
+            self._state.telemetry = telemetry
             return self._state
 
     def snapshot(self) -> Dict:
@@ -292,6 +302,7 @@ class NeatSimulationBackend:
                     "bodies": len(world.bodies),
                 },
                 "frame": self._capture_frame(world),
+                "telemetry": getattr(self._state, "telemetry", {}),
             }
 
     def save_agents(self) -> Path:
@@ -342,6 +353,7 @@ class NeatSimulationBackend:
                 food_count=len(getattr(world, "foods", [])),
                 body_count=len(getattr(world, "bodies", [])),
                 frame=self._capture_frame(world),
+                telemetry={},
             )
 
     # ----- internals -----
@@ -376,6 +388,12 @@ class NeatSimulationBackend:
         sim.MOVE_COST_K = cfg.metabolism.move_cost_k
         sim.BRAIN_COST_PER_CONN = cfg.metabolism.brain_cost_per_conn
         sim.FISSION_RATE_FACTOR = cfg.metabolism.fission_bias
+        sim.DASH_VMAX_MULT = cfg.metabolism.dash_vmax_mult
+        sim.DASH_COST = cfg.metabolism.dash_cost
+        sim.DEFEND_STRENGTH = cfg.metabolism.defend_strength
+        sim.DEFEND_COST = cfg.metabolism.defend_cost
+        sim.REST_BASE_COST_MULT = cfg.metabolism.rest_base_cost_mult
+        sim.REST_COST = cfg.metabolism.rest_cost
  
         sim.N_RAYS = cfg.brain.rays
         sim.R_SENSE = cfg.brain.sense_range
@@ -383,9 +401,12 @@ class NeatSimulationBackend:
         sim.P_ADD_CONN = cfg.brain.add_connection_rate
         sim.P_ADD_NODE = cfg.brain.add_node_rate
         sim.P_DEL_CONN = cfg.brain.delete_connection_rate
+        sim.ENABLE_ADVANCED_ACTIONS = bool(getattr(cfg.brain, "enable_advanced_actions", False))
 
         sim.IN_FEATURES = sim.N_RAYS * 3 + 4
         sim.INPUT_IDS = list(range(0, sim.IN_FEATURES))
+        sim.OUT_FEATURES = 8 if sim.ENABLE_ADVANCED_ACTIONS else 5
+        sim.OUTPUT_IDS = list(range(100, 100 + sim.OUT_FEATURES))
 
         # Recompute grid to match possible world size changes.
         sim.GRID_W = int(math.ceil(sim.W / sim.CELL))
@@ -413,14 +434,46 @@ class NeatSimulationBackend:
             "foods": [],
             "bodies": [],
         }
+        hazard_field = getattr(world, "_hazard_field", None)
+        if hazard_field is not None:
+            try:
+                frame["hazard"] = {
+                    "grid_w": int(getattr(sim, "GRID_W", 0)),
+                    "grid_h": int(getattr(sim, "GRID_H", 0)),
+                    "cell": float(getattr(sim, "CELL", 1.0)),
+                    "values": hazard_field.astype("float32").ravel().tolist(),
+                }
+            except Exception:
+                pass
         agents = getattr(world, "agents", [])
         for agent in agents:
             frame["agents"].append(
                 {
+                    "id": int(getattr(agent, "id", -1)),
+                    "parent_id": getattr(agent, "parent_id", None),
+                    "parent2_id": getattr(agent, "parent2_id", None),
+                    "birth_tick": int(getattr(agent, "birth_tick", 0)),
+                    "age": int(getattr(agent, "age", 0)),
                     "x": float(agent.x),
                     "y": float(agent.y),
                     "size": float(getattr(agent, "S", 1.0)),
                     "energy": float(getattr(agent, "E", 0.0)),
+                    "thrust": float(getattr(agent, "last_thrust", 0.0)),
+                    "turn": float(getattr(agent, "last_turn", 0.0)),
+                    "attack": bool(getattr(agent, "last_attack", False)),
+                    "mate": bool(getattr(agent, "last_mate", False)),
+                    "eat_strength": float(getattr(agent, "last_eat_strength", 0.0)),
+                    "dash": bool(getattr(agent, "last_dash", False)),
+                    "defend": bool(getattr(agent, "last_defend", False)),
+                    "rest": bool(getattr(agent, "last_rest", False)),
+                    "strategy": str(getattr(agent, "strategy_tag", "")),
+                    "food_energy_total": float(getattr(agent, "food_energy_total", 0.0)),
+                    "body_energy_total": float(getattr(agent, "body_energy_total", 0.0)),
+                    "attack_attempts_total": int(getattr(agent, "attack_attempts_total", 0)),
+                    "attack_successes_total": int(getattr(agent, "attack_successes_total", 0)),
+                    "mate_attempts_total": int(getattr(agent, "mate_attempts_total", 0)),
+                    "mate_successes_total": int(getattr(agent, "mate_successes_total", 0)),
+                    "fissions_total": int(getattr(agent, "fissions_total", 0)),
                 }
             )
         for food in getattr(world, "foods", []):

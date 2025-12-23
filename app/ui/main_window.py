@@ -8,7 +8,7 @@ from pathlib import Path
 from shutil import copy2
 from typing import Callable, Dict, Optional, Sequence, Tuple, Union
 
-from PySide6.QtCore import Qt, QRectF, Signal, QTimer
+from PySide6.QtCore import Qt, QRectF, Signal
 from PySide6.QtGui import QBrush, QColor, QPainter, QPen
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -24,6 +24,7 @@ from PySide6.QtWidgets import (
     QSpinBox,
     QScrollArea,
     QTextEdit,
+    QToolTip,
     QVBoxLayout,
     QWidget,
 )
@@ -33,6 +34,7 @@ from dataclasses import dataclass, asdict
 from app.core.config import SimulationConfig
 from app.core.controller import SimulationController
 from app.state_manager import StateManager
+from app.ui.stats_viewer import StatsViewerWindow
 
 NumberWidget = Union[QDoubleSpinBox, QSpinBox]
 
@@ -177,6 +179,30 @@ class ParameterEditor(QWidget):
             "分裂バイアス",
             self._number_box("metabolism", "fission_bias", decimals=2, step=0.1, min_val=0.1, max_val=3.0),
         )
+        form.addRow(
+            "ダッシュ速度倍率",
+            self._number_box("metabolism", "dash_vmax_mult", decimals=2, step=0.1, min_val=1.0, max_val=3.0),
+        )
+        form.addRow(
+            "ダッシュコスト",
+            self._number_box("metabolism", "dash_cost", decimals=3, step=0.05, min_val=0.0, max_val=5.0),
+        )
+        form.addRow(
+            "防御強度",
+            self._number_box("metabolism", "defend_strength", decimals=2, step=0.05, min_val=0.0, max_val=1.0),
+        )
+        form.addRow(
+            "防御コスト",
+            self._number_box("metabolism", "defend_cost", decimals=3, step=0.05, min_val=0.0, max_val=5.0),
+        )
+        form.addRow(
+            "休息基礎消費倍率",
+            self._number_box("metabolism", "rest_base_cost_mult", decimals=2, step=0.05, min_val=0.0, max_val=1.0),
+        )
+        form.addRow(
+            "休息コスト",
+            self._number_box("metabolism", "rest_cost", decimals=3, step=0.05, min_val=0.0, max_val=5.0),
+        )
         vbox.addLayout(form)
         vbox.addLayout(self._section_buttons_layout("metabolism"))
         layout.addWidget(group)
@@ -209,6 +235,11 @@ class ParameterEditor(QWidget):
             "結合削除率",
             self._number_box("brain", "delete_connection_rate", decimals=3, step=0.01, min_val=0.0, max_val=1.0),
         )
+        chk = QCheckBox()
+        chk.setChecked(bool(getattr(self._config.brain, "enable_advanced_actions", False)))
+        self._bool_controls[("brain", "enable_advanced_actions")] = chk
+        chk.toggled.connect(self._sync_config)
+        form.addRow("追加行動（ダッシュ/防御/休息）", chk)
         vbox.addLayout(form)
         vbox.addLayout(self._section_buttons_layout("brain"))
         layout.addWidget(group)
@@ -323,7 +354,7 @@ class SimulationStatsWidget(QGroupBox):
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__("ライブ統計", parent)
-        self._fields: Dict[str, Tuple[str, Callable[[float], str]]] = {
+        self._basic_fields: Dict[str, Tuple[str, Callable[[float], str]]] = {
             "tick": ("経過Tick", lambda v: f"{int(v)}"),
             "population": ("個体数", lambda v: f"{int(v)}"),
             "mean_energy": ("平均エネルギー", lambda v: f"{float(v):.1f}"),
@@ -332,24 +363,69 @@ class SimulationStatsWidget(QGroupBox):
             "food": ("フード数", lambda v: f"{int(v)}"),
             "bodies": ("死体数", lambda v: f"{int(v)}"),
         }
+        self._advanced_fields: Dict[str, Tuple[str, Callable[[float], str]]] = {
+            "season_mult": ("季節係数", lambda v: f"{float(v):.3f}"),
+            "hazard_mean": ("危険平均", lambda v: f"{float(v):.3f}"),
+            "hazard_coverage": ("危険カバレッジ", lambda v: f"{float(v) * 100.0:.1f}%"),
+            "dash_active": ("ダッシュ人数", lambda v: f"{int(v)}"),
+            "defend_active": ("防御人数", lambda v: f"{int(v)}"),
+            "rest_active": ("休息人数", lambda v: f"{int(v)}"),
+            "attack_attempts": ("攻撃試行", lambda v: f"{int(v)}"),
+            "attack_successes": ("攻撃成功", lambda v: f"{int(v)}"),
+            "mate_attempts": ("交配試行", lambda v: f"{int(v)}"),
+            "mate_successes": ("交配成立", lambda v: f"{int(v)}"),
+            "fissions": ("分裂回数", lambda v: f"{int(v)}"),
+            "deaths_attack": ("死亡(攻撃)", lambda v: f"{int(v)}"),
+            "deaths_hazard": ("死亡(危険)", lambda v: f"{int(v)}"),
+            "deaths_energy": ("死亡(エネルギー)", lambda v: f"{int(v)}"),
+            "mean_speed_frac": ("平均速度比", lambda v: f"{float(v):.3f}"),
+            "mean_thrust": ("平均thrust", lambda v: f"{float(v):.3f}"),
+            "mean_turn": ("平均turn", lambda v: f"{float(v):.3f}"),
+            "mean_eat_strength": ("平均摂食強度", lambda v: f"{float(v):.3f}"),
+            "eat_energy_food": ("摂食エネ(フード)", lambda v: f"{float(v):.1f}"),
+            "eat_energy_body": ("摂食エネ(死体)", lambda v: f"{float(v):.1f}"),
+        }
         self._labels: Dict[str, QLabel] = {}
-        layout = QFormLayout(self)
-        for key, (title, _) in self._fields.items():
+        outer = QVBoxLayout(self)
+
+        basic_layout = QFormLayout()
+        for key, (title, _) in self._basic_fields.items():
             lbl = QLabel("0")
             lbl.setObjectName(f"stat_{key}")
-            layout.addRow(title, lbl)
+            basic_layout.addRow(title, lbl)
             self._labels[key] = lbl
+        outer.addLayout(basic_layout)
+
+        self._toggle_btn = QPushButton("詳細を表示")
+        self._toggle_btn.setCheckable(True)
+        self._toggle_btn.toggled.connect(self._set_advanced_visible)
+        outer.addWidget(self._toggle_btn)
+
+        self._advanced_container = QWidget(self)
+        advanced_layout = QFormLayout(self._advanced_container)
+        for key, (title, _) in self._advanced_fields.items():
+            lbl = QLabel("0")
+            lbl.setObjectName(f"stat_{key}")
+            advanced_layout.addRow(title, lbl)
+            self._labels[key] = lbl
+        self._advanced_container.setVisible(False)
+        outer.addWidget(self._advanced_container)
+
+    def _set_advanced_visible(self, visible: bool) -> None:
+        self._advanced_container.setVisible(bool(visible))
+        self._toggle_btn.setText("詳細を隠す" if visible else "詳細を表示")
 
     def update_stats(self, stats: Dict) -> None:
-        for key, (_, formatter) in self._fields.items():
-            value = stats.get(key)
-            if value is None:
-                continue
-            try:
-                text = formatter(value)
-            except Exception:
-                text = str(value)
-            self._labels[key].setText(text)
+        for fields in (self._basic_fields, self._advanced_fields):
+            for key, (_, formatter) in fields.items():
+                value = stats.get(key)
+                if value is None:
+                    continue
+                try:
+                    text = formatter(value)
+                except Exception:
+                    text = str(value)
+                self._labels[key].setText(text)
 
 
 class WorldViewWidget(QWidget):
@@ -359,6 +435,10 @@ class WorldViewWidget(QWidget):
         super().__init__(parent)
         self._frame: Dict | None = None
         self.setMinimumSize(420, 420)
+        self.setMouseTracking(True)
+        self._view_transform: Tuple[float, float, float] | None = None  # (scale, offset_x, offset_y)
+        self._world_size: Tuple[float, float] = (1.0, 1.0)
+        self._hovered_agent_id: int | None = None
         self._food_colors = [
             QColor(70, 200, 120),
             QColor(110, 180, 240),
@@ -370,6 +450,81 @@ class WorldViewWidget(QWidget):
     def update_frame(self, frame: Dict | None) -> None:
         self._frame = frame
         self.update()
+
+    def mouseMoveEvent(self, event) -> None:  # noqa: N802
+        if not self._frame or not self._view_transform:
+            return super().mouseMoveEvent(event)
+        scale, offset_x, offset_y = self._view_transform
+        click_x = float(event.position().x())
+        click_y = float(event.position().y())
+
+        best = None
+        best_d2 = float("inf")
+        threshold = 16.0 * 16.0
+        for agent in self._frame.get("agents", []):
+            ax = offset_x + float(agent.get("x", 0.0)) * scale
+            ay = offset_y + float(agent.get("y", 0.0)) * scale
+            dx = click_x - ax
+            dy = click_y - ay
+            d2 = dx * dx + dy * dy
+            if d2 < best_d2:
+                best_d2 = d2
+                best = agent
+        if best is None or best_d2 > threshold:
+            if self._hovered_agent_id is not None:
+                self._hovered_agent_id = None
+                QToolTip.hideText()
+            return super().mouseMoveEvent(event)
+
+        try:
+            agent_id = int(best.get("id"))
+        except Exception:
+            agent_id = None
+        if agent_id != self._hovered_agent_id:
+            self._hovered_agent_id = agent_id
+            tooltip = self._format_agent_tooltip(best)
+            QToolTip.showText(event.globalPosition().toPoint(), tooltip, self)
+        return super().mouseMoveEvent(event)
+
+    def leaveEvent(self, event) -> None:  # noqa: N802
+        self._hovered_agent_id = None
+        QToolTip.hideText()
+        return super().leaveEvent(event)
+
+    def _format_agent_tooltip(self, agent: Dict) -> str:
+        agent_id = agent.get("id", "-")
+        strategy = agent.get("strategy", "-")
+        age = agent.get("age", "-")
+        energy = float(agent.get("energy", 0.0))
+        size = float(agent.get("size", 0.0))
+        p1 = agent.get("parent_id")
+        p2 = agent.get("parent2_id")
+        parents = "-" if (p1 is None and p2 is None) else (str(p1) if p2 is None else f"{p1}, {p2}")
+        attacks = f"{int(agent.get('attack_attempts_total', 0))}/{int(agent.get('attack_successes_total', 0))}"
+        mates = f"{int(agent.get('mate_attempts_total', 0))}/{int(agent.get('mate_successes_total', 0))}"
+        fissions = int(agent.get("fissions_total", 0))
+        food_energy = float(agent.get("food_energy_total", 0.0))
+        body_energy = float(agent.get("body_energy_total", 0.0))
+        flags = []
+        if agent.get("dash"):
+            flags.append("dash")
+        if agent.get("defend"):
+            flags.append("defend")
+        if agent.get("rest"):
+            flags.append("rest")
+        state = "-" if not flags else ", ".join(flags)
+        return (
+            f"ID: {agent_id}\n"
+            f"戦略: {strategy}\n"
+            f"年齢(tick): {age}\n"
+            f"E: {energy:.1f} / Size: {size:.3f}\n"
+            f"親ID: {parents}\n"
+            f"状態: {state}\n"
+            f"攻撃(試行/成功): {attacks}\n"
+            f"交配(試行/成立): {mates}\n"
+            f"分裂: {fissions}\n"
+            f"摂食エネ(フード/死体): {food_energy:.1f}/{body_energy:.1f}"
+        )
 
     def paintEvent(self, event) -> None:  # noqa: N802
         painter = QPainter(self)
@@ -389,6 +544,8 @@ class WorldViewWidget(QWidget):
         scale = min(avail_w / world_w, avail_h / world_h)
         offset_x = (self.width() - world_w * scale) / 2.0
         offset_y = (self.height() - world_h * scale) / 2.0
+        self._view_transform = (scale, offset_x, offset_y)
+        self._world_size = (world_w, world_h)
 
         painter.setPen(QPen(QColor(80, 90, 110)))
         painter.setBrush(Qt.NoBrush)
@@ -396,6 +553,33 @@ class WorldViewWidget(QWidget):
 
         def to_px(x: float, y: float) -> Tuple[float, float]:
             return offset_x + x * scale, offset_y + y * scale
+
+        hazard = frame.get("hazard")
+        if isinstance(hazard, dict):
+            values = hazard.get("values")
+            try:
+                grid_w = int(hazard.get("grid_w", 0))
+                grid_h = int(hazard.get("grid_h", 0))
+                cell = float(hazard.get("cell", 1.0))
+            except Exception:
+                grid_w = 0
+                grid_h = 0
+                cell = 1.0
+            if grid_w > 0 and grid_h > 0 and isinstance(values, list) and len(values) >= grid_w * grid_h:
+                painter.setPen(Qt.NoPen)
+                for gy in range(grid_h):
+                    base = gy * grid_w
+                    for gx in range(grid_w):
+                        v = float(values[base + gx])
+                        if v <= 1e-6:
+                            continue
+                        alpha = max(0, min(180, int(240.0 * v)))
+                        painter.setBrush(QBrush(QColor(220, 70, 70, alpha)))
+                        x0 = gx * cell
+                        y0 = gy * cell
+                        px0, py0 = to_px(x0, y0)
+                        px1, py1 = to_px(min(world_w, x0 + cell), min(world_h, y0 + cell))
+                        painter.drawRect(QRectF(px0, py0, max(1.0, px1 - px0), max(1.0, py1 - py0)))
 
         # Draw foods
         painter.setPen(Qt.NoPen)
@@ -432,55 +616,6 @@ class WorldViewWidget(QWidget):
 
 
 @dataclass
-class RecordedFrame:
-    stats: Dict
-    frame: Dict | None
-
-
-class ActionRecorder:
-    """Keeps a sequence of state snapshots for later playback."""
-
-    def __init__(self) -> None:
-        self._recording = False
-        self._frames: list[RecordedFrame] = []
-
-    def start(self) -> None:
-        self._frames.clear()
-        self._recording = True
-
-    def stop(self) -> None:
-        self._recording = False
-
-    def record(self, stats: Dict, frame: Dict | None) -> None:
-        if not self._recording:
-            return
-        self._frames.append(RecordedFrame(stats=deepcopy(stats), frame=deepcopy(frame) if frame else None))
-
-    @property
-    def is_recording(self) -> bool:
-        return self._recording
-
-    @property
-    def has_frames(self) -> bool:
-        return bool(self._frames)
-
-    @property
-    def frame_count(self) -> int:
-        return len(self._frames)
-
-    @property
-    def frames(self) -> Sequence[RecordedFrame]:
-        return self._frames
-
-    def export_payload(self) -> Dict:
-        return {
-            "version": 1,
-            "frame_count": len(self._frames),
-            "frames": [{"stats": frame.stats, "frame": frame.frame} for frame in self._frames],
-        }
-
-
-@dataclass
 class StatsSample:
     tick: int
     population: int
@@ -489,6 +624,26 @@ class StatsSample:
     deaths: int
     food: int
     bodies: int
+    season_mult: float
+    hazard_mean: float
+    hazard_coverage: float
+    dash_active: int
+    defend_active: int
+    rest_active: int
+    attack_attempts: int
+    attack_successes: int
+    mate_attempts: int
+    mate_successes: int
+    fissions: int
+    deaths_attack: int
+    deaths_hazard: int
+    deaths_energy: int
+    mean_speed_frac: float
+    mean_thrust: float
+    mean_turn: float
+    mean_eat_strength: float
+    eat_energy_food: float
+    eat_energy_body: float
     agents_in_frame: int
     avg_agent_energy: float
     avg_agent_size: float
@@ -523,6 +678,26 @@ class StatsRecorder:
             deaths=int(stats.get("deaths", 0)),
             food=int(stats.get("food", 0)),
             bodies=int(stats.get("bodies", 0)),
+            season_mult=float(stats.get("season_mult", 0.0)),
+            hazard_mean=float(stats.get("hazard_mean", 0.0)),
+            hazard_coverage=float(stats.get("hazard_coverage", 0.0)),
+            dash_active=int(stats.get("dash_active", 0)),
+            defend_active=int(stats.get("defend_active", 0)),
+            rest_active=int(stats.get("rest_active", 0)),
+            attack_attempts=int(stats.get("attack_attempts", 0)),
+            attack_successes=int(stats.get("attack_successes", 0)),
+            mate_attempts=int(stats.get("mate_attempts", 0)),
+            mate_successes=int(stats.get("mate_successes", 0)),
+            fissions=int(stats.get("fissions", 0)),
+            deaths_attack=int(stats.get("deaths_attack", 0)),
+            deaths_hazard=int(stats.get("deaths_hazard", 0)),
+            deaths_energy=int(stats.get("deaths_energy", 0)),
+            mean_speed_frac=float(stats.get("mean_speed_frac", 0.0)),
+            mean_thrust=float(stats.get("mean_thrust", 0.0)),
+            mean_turn=float(stats.get("mean_turn", 0.0)),
+            mean_eat_strength=float(stats.get("mean_eat_strength", 0.0)),
+            eat_energy_food=float(stats.get("eat_energy_food", 0.0)),
+            eat_energy_body=float(stats.get("eat_energy_body", 0.0)),
             agents_in_frame=len(agents),
             avg_agent_energy=avg_agent_energy,
             avg_agent_size=avg_agent_size,
@@ -549,6 +724,26 @@ class StatsRecorder:
             "deaths",
             "food_resources",
             "bodies",
+            "season_mult",
+            "hazard_mean",
+            "hazard_coverage",
+            "dash_active",
+            "defend_active",
+            "rest_active",
+            "attack_attempts",
+            "attack_successes",
+            "mate_attempts",
+            "mate_successes",
+            "fissions",
+            "deaths_attack",
+            "deaths_hazard",
+            "deaths_energy",
+            "mean_speed_frac",
+            "mean_thrust",
+            "mean_turn",
+            "mean_eat_strength",
+            "eat_energy_food",
+            "eat_energy_body",
             "agents_in_frame",
             "avg_agent_energy",
             "avg_agent_size",
@@ -569,6 +764,26 @@ class StatsRecorder:
                         sample.deaths,
                         sample.food,
                         sample.bodies,
+                        f"{sample.season_mult:.6f}",
+                        f"{sample.hazard_mean:.6f}",
+                        f"{sample.hazard_coverage:.6f}",
+                        sample.dash_active,
+                        sample.defend_active,
+                        sample.rest_active,
+                        sample.attack_attempts,
+                        sample.attack_successes,
+                        sample.mate_attempts,
+                        sample.mate_successes,
+                        sample.fissions,
+                        sample.deaths_attack,
+                        sample.deaths_hazard,
+                        sample.deaths_energy,
+                        f"{sample.mean_speed_frac:.6f}",
+                        f"{sample.mean_thrust:.6f}",
+                        f"{sample.mean_turn:.6f}",
+                        f"{sample.mean_eat_strength:.6f}",
+                        f"{sample.eat_energy_food:.6f}",
+                        f"{sample.eat_energy_body:.6f}",
                         sample.agents_in_frame,
                         f"{sample.avg_agent_energy:.4f}",
                         f"{sample.avg_agent_size:.4f}",
@@ -586,13 +801,8 @@ class MainWindow(QMainWindow):
         self._file_filter = "JSON ファイル (*.json);;すべてのファイル (*)"
         self.setWindowTitle("人工生命シミュレーター")
         self.resize(1200, 800)
-        self._recorder = ActionRecorder()
-        self._playback_timer = QTimer(self)
-        self._playback_timer.setInterval(75)
-        self._playback_timer.timeout.connect(self._advance_playback)
-        self._playback_index = 0
-        self._playback_active = False
         self._stats_recorder = StatsRecorder()
+        self._stats_viewer: StatsViewerWindow | None = None
 
         self._build_menu()
         self._build_ui()
@@ -601,6 +811,8 @@ class MainWindow(QMainWindow):
 
     def _build_menu(self) -> None:
         file_menu = self.menuBar().addMenu("ファイル(&F)")
+        stats_action = file_menu.addAction("統計ビューア…")
+        stats_action.triggered.connect(self._open_stats_viewer)
         exit_action = file_menu.addAction("終了(&X)")
         exit_action.triggered.connect(self.close)
 
@@ -639,21 +851,11 @@ class MainWindow(QMainWindow):
         self.stop_button.setEnabled(False)
         self.save_button = QPushButton("個体を保存")
         self.load_button = QPushButton("個体を読み込み")
-        self.record_button = QPushButton("記録開始")
-        self.record_button.setCheckable(True)
-        self.playback_button = QPushButton("再生")
-        self.playback_button.setCheckable(True)
-        self.playback_button.setEnabled(False)
-        self.export_record_button = QPushButton("記録を保存")
-        self.export_record_button.setEnabled(False)
         self.export_stats_button = QPushButton("統計を保存")
         button_row.addWidget(self.start_button)
         button_row.addWidget(self.stop_button)
         button_row.addWidget(self.save_button)
         button_row.addWidget(self.load_button)
-        button_row.addWidget(self.record_button)
-        button_row.addWidget(self.playback_button)
-        button_row.addWidget(self.export_record_button)
         button_row.addWidget(self.export_stats_button)
         right_layout.addLayout(button_row)
 
@@ -676,9 +878,6 @@ class MainWindow(QMainWindow):
         self.stop_button.clicked.connect(self.stop_simulation)
         self.save_button.clicked.connect(self.save_agents_snapshot)
         self.load_button.clicked.connect(self.load_agents_snapshot)
-        self.record_button.toggled.connect(self._toggle_recording)
-        self.playback_button.toggled.connect(self._toggle_playback)
-        self.export_record_button.clicked.connect(self._export_recording)
         self.export_stats_button.clicked.connect(self._export_stats)
         self.parameter_editor.section_save_requested.connect(self._on_section_save_requested)
         self.parameter_editor.section_load_requested.connect(self._on_section_load_requested)
@@ -754,7 +953,6 @@ class MainWindow(QMainWindow):
             frame = stats.pop("frame", None)
 
         self._render_state(stats, frame)
-        self._recorder.record(stats, frame)
         self._stats_recorder.record(stats, frame)
 
     def _on_config_changed(self, config_dict: Dict) -> None:
@@ -780,7 +978,6 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802
         if self.controller:
             self.controller.stop()
-        self._stop_playback()
         super().closeEvent(event)
 
     def _backup_existing_file(self, path: Path) -> Optional[Path]:
@@ -806,107 +1003,6 @@ class MainWindow(QMainWindow):
         if frame:
             self.world_view.update_frame(frame)
 
-    def _toggle_recording(self, checked: bool) -> None:
-        if checked:
-            if self._playback_active:
-                self._stop_playback()
-            self._recorder.start()
-            self.record_button.setText("記録停止")
-            self.playback_button.setEnabled(False)
-            self.export_record_button.setEnabled(False)
-            self._append_log("行動の記録を開始しました。")
-            self.statusBar().showMessage("行動の記録を開始しました", 3000)
-            return
-
-        self._recorder.stop()
-        self.record_button.setText("記録開始")
-        frames = self._recorder.frame_count
-        self._append_log(f"行動の記録を停止しました（{frames} フレーム）")
-        self.statusBar().showMessage(f"行動の記録を停止しました（{frames} フレーム）", 5000)
-        self._update_recording_controls()
-
-    def _toggle_playback(self, checked: bool) -> None:
-        if checked:
-            if not self._recorder.has_frames:
-                QMessageBox.information(self, "再生できません", "再生可能な記録がありません。")
-                self.playback_button.blockSignals(True)
-                self.playback_button.setChecked(False)
-                self.playback_button.blockSignals(False)
-                return
-            self.controller.stop()
-            self._start_playback()
-            return
-        self._stop_playback()
-
-    def _start_playback(self) -> None:
-        self._playback_index = 0
-        self._playback_active = True
-        self._playback_timer.start()
-        self.playback_button.setText("再生停止")
-        self.record_button.setEnabled(False)
-        self.export_record_button.setEnabled(False)
-        self.start_button.setEnabled(False)
-        self.stop_button.setEnabled(False)
-        self._start_action.setEnabled(False)
-        self._stop_action.setEnabled(False)
-        self.statusBar().showMessage("記録を再生しています…")
-        self._append_log("記録の再生を開始しました。")
-
-    def _stop_playback(self) -> None:
-        if not self._playback_active:
-            self.playback_button.blockSignals(True)
-            self.playback_button.setChecked(False)
-            self.playback_button.blockSignals(False)
-            self.playback_button.setText("再生")
-            self.record_button.setEnabled(True)
-            self._update_recording_controls()
-            return
-        self._playback_timer.stop()
-        self._playback_active = False
-        self._playback_index = 0
-        self.playback_button.blockSignals(True)
-        self.playback_button.setChecked(False)
-        self.playback_button.blockSignals(False)
-        self.playback_button.setText("再生")
-        self.record_button.setEnabled(True)
-        self.start_button.setEnabled(True)
-        self.stop_button.setEnabled(False)
-        self._start_action.setEnabled(True)
-        self._stop_action.setEnabled(False)
-        self.statusBar().showMessage("記録の再生を停止しました", 3000)
-        self._append_log("記録の再生を停止しました。")
-        self._update_recording_controls()
-
-    def _advance_playback(self) -> None:
-        frames = self._recorder.frames
-        if self._playback_index >= len(frames):
-            self._stop_playback()
-            return
-        frame = frames[self._playback_index]
-        self._render_state(frame.stats, frame.frame)
-        self._playback_index += 1
-        if self._playback_index >= len(frames):
-            self._stop_playback()
-
-    def _update_recording_controls(self) -> None:
-        enabled = self._recorder.has_frames and not self._recorder.is_recording and not self._playback_active
-        self.playback_button.setEnabled(enabled)
-        self.export_record_button.setEnabled(enabled)
-
-    def _export_recording(self) -> None:
-        if not self._recorder.has_frames:
-            QMessageBox.information(self, "保存できません", "保存可能な記録がありません。")
-            return
-        suggested = Path.cwd() / "simulation_recording.json"
-        path = self._get_save_path("記録を保存", suggested)
-        if path is None:
-            return
-        data = self._recorder.export_payload()
-        if self._write_json(path, data):
-            frames = self._recorder.frame_count
-            self._append_log(f"記録を {path} に保存しました（{frames} フレーム）")
-            self.statusBar().showMessage(f"記録を {path} に保存しました", 5000)
-
     def _export_stats(self) -> None:
         if not self._stats_recorder.has_data():
             QMessageBox.information(self, "保存できません", "保存可能な統計データがありません。")
@@ -922,6 +1018,18 @@ class MainWindow(QMainWindow):
             return
         self._append_log(f"統計データを {path} に保存しました（{self._stats_recorder.sample_count()} 行）")
         self.statusBar().showMessage(f"統計データを {path} に保存しました", 5000)
+
+    def _open_stats_viewer(self) -> None:
+        suggested = Path.cwd() / "simulation_stats.csv"
+        path = self._get_open_path("統計CSVを開く", suggested if suggested.exists() else None)
+        if path is None:
+            return
+        if self._stats_viewer is None:
+            self._stats_viewer = StatsViewerWindow(parent=self)
+        self._stats_viewer.load_csv(path)
+        self._stats_viewer.show()
+        self._stats_viewer.raise_()
+        self._stats_viewer.activateWindow()
 
     def _on_section_save_requested(self, section: str) -> None:
         label = self.parameter_editor.section_label(section)
