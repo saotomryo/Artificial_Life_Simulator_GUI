@@ -1,3 +1,7 @@
 PySide6
 numpy
 pygame
+gradio
+Pillow
+pandas
+matplotlib

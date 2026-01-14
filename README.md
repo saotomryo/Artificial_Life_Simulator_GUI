@@ -88,6 +88,12 @@ python -m app.main --sim-module mypkg.custom_sim
 python -m app.main --sim-file path/to/custom_sim.py
 ```
 
+### 3. Gradio UI を使う場合（追加UI）
+```bash
+python -m app.gradio_app
+```
+Hugging Face Spaces ではリポジトリ直下の `app.py` がエントリーポイントになります。
+
 #### 主なコマンドラインオプション
 | オプション | 説明 | 既定値 |
 | ---------- | ---- | ------ |
