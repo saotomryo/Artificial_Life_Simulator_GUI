@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 # Artificial Life Simulator GUI
 
 人工生命シミュレーションを操作・観察するための PySide6 製 GUI アプリケーションです。  
@@ -204,3 +205,18 @@ NEAT バックエンドで読み込む際は `_bootstrap_from_last10_diverse` �
 ## 参考ドキュメント
 - [ロードマップ](docs/roadmap.md)
 - [NEAT シミュレーション仕様](docs/neat_simulation.md)
+=======
+---
+title: Artificial Life Simulator GUI
+emoji: 📉
+colorFrom: red
+colorTo: purple
+sdk: gradio
+sdk_version: 6.3.0
+app_file: app.py
+pinned: false
+license: mit
+---
+
+Check out the configuration reference at https://huggingface.co/docs/hub/spaces-config-reference
+>>>>>>> b1e1fa1 (initial commit)
